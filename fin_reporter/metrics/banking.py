@@ -9,6 +9,11 @@ Q4 normalization:
     Q4 filings often contain only full-year (FY) cumulative figures. When the
     previous quarter's XBRL file is available in the same directory, we compute
     Q4 = FY_cumulative − Q3_YTD_cumulative for each metric.
+
+Q2/Q3 normalization:
+    Some banks publish only H1 (Q2) or 9M (Q3) cumulative P&L contexts. When a
+    direct ~3-month context is missing, we derive the quarter from the prior
+    quarter's cached XBRL file: Q2 = H1 − Q1, Q3 = 9M − H1.
 """
 
 import datetime as dt
@@ -46,6 +51,11 @@ from fin_reporter.xbrl_parser import (
 )
 
 _NAMESPACE_MODE = "in-gaap"
+
+_QUARTER_DURATION = (80, 100)
+_H1_DURATION = (170, 190)
+_NINE_MONTH_DURATION = (240, 300)
+_FY_DURATION = (330, 380)
 
 
 def _normalize_ratio_to_percentage(value: float | None) -> float | None:
@@ -275,24 +285,247 @@ def _extract_bank_npa(
     return gnpa, nnpa
 
 
-def _apply_q4_delta_normalization(
-    facts: dict,
+def _intermediate_quarter_ytd_durations(
+    target_end_date: dt.date,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Return (current_ytd_duration, prior_ytd_duration) for Q2/Q3 delta logic."""
+    if target_end_date.month == 9 and target_end_date.day == 30:
+        return _H1_DURATION, _QUARTER_DURATION
+    if target_end_date.month == 12 and target_end_date.day == 31:
+        return _NINE_MONTH_DURATION, _H1_DURATION
+    return None
+
+
+def _load_previous_quarter_facts(
     file_path: str,
     target_end_date: dt.date,
-    interest_earned: float | None,
-    other_income: float | None,
-    interest_expended: float | None,
+) -> tuple[dict, dt.date] | tuple[None, None]:
+    """Load prior-quarter XBRL facts from the same cache directory."""
+    quarter_code = quarter_code_from_file_path(file_path)
+    prev_code = previous_quarter_code(quarter_code) if quarter_code else None
+    prev_file = find_symbol_quarter_file(file_path, prev_code) if prev_code else None
+    if not prev_file:
+        return None, None
+
+    prev_facts, _prev_contexts = extract_facts(prev_file)
+    prev_end_date = previous_quarter_end(target_end_date)
+    if not prev_end_date or not prev_facts:
+        return None, None
+    return prev_facts, prev_end_date
+
+
+def _apply_period_delta_metrics(
+    facts: dict,
+    prev_facts: dict,
+    target_end_date: dt.date,
+    prev_end_date: dt.date,
+    current_duration: tuple[int, int],
+    prior_duration: tuple[int, int],
     nii: float | None,
     total_income: float | None,
     ppop: float | None,
     pbt: float | None,
     net_income: float | None,
+    basic_eps: float | None,
 ) -> tuple[
-    float | None,  # nii
-    float | None,  # total_income
-    float | None,  # ppop
-    float | None,  # pbt
-    float | None,  # net_income
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
+    """Derive a quarter by subtracting prior-period YTD cumulative from current YTD."""
+    full_ie = pick_cumulative_value(
+        facts, BANK_INTEREST_EARNED_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_oi = pick_cumulative_value(
+        facts, OTHER_INCOME_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_ix = pick_cumulative_value(
+        facts, BANK_INTEREST_EXPENDED_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_op = pick_cumulative_value(
+        facts, BANK_OPERATING_PROFIT_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_pbt = pick_cumulative_value(
+        facts, BANK_PBT_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_net = pick_cumulative_value(
+        facts, BANK_NET_PROFIT_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+    full_eps = pick_cumulative_value(
+        facts, BANK_BASIC_EPS_TAGS, _NAMESPACE_MODE,
+        target_end_date, current_duration,
+    )
+
+    prev_ie = pick_cumulative_value(
+        prev_facts, BANK_INTEREST_EARNED_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_oi = pick_cumulative_value(
+        prev_facts, OTHER_INCOME_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_ix = pick_cumulative_value(
+        prev_facts, BANK_INTEREST_EXPENDED_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_op = pick_cumulative_value(
+        prev_facts, BANK_OPERATING_PROFIT_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_pbt = pick_cumulative_value(
+        prev_facts, BANK_PBT_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_net = pick_cumulative_value(
+        prev_facts, BANK_NET_PROFIT_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+    prev_eps = pick_cumulative_value(
+        prev_facts, BANK_BASIC_EPS_TAGS, _NAMESPACE_MODE,
+        prev_end_date, prior_duration,
+    )
+
+    if (
+        full_ie is not None
+        and full_ix is not None
+        and prev_ie is not None
+        and prev_ix is not None
+    ):
+        delta_ie = full_ie - prev_ie
+        delta_ix = full_ix - prev_ix
+        delta_nii = delta_ie - delta_ix
+        if should_apply_q4_delta(delta_nii, nii):
+            nii = delta_nii
+
+        delta_oi = (full_oi or 0.0) - (prev_oi or 0.0)
+        delta_total_income = delta_ie + delta_oi
+        if should_apply_q4_delta(delta_total_income, total_income) and (
+            nii is None
+            or delta_total_income is None
+            or delta_total_income >= nii
+        ):
+            total_income = delta_total_income
+        elif nii is not None and total_income is None:
+            # Cross-filing OI restatements can make IE+OI delta < NII; use NII.
+            total_income = nii
+
+    if full_op is not None and prev_op is not None:
+        delta_ppop = full_op - prev_op
+        if should_apply_q4_delta(delta_ppop, ppop):
+            ppop = delta_ppop
+
+    if full_pbt is not None and prev_pbt is not None:
+        delta_pbt = full_pbt - prev_pbt
+        if should_apply_q4_delta(delta_pbt, pbt):
+            pbt = delta_pbt
+
+    if full_net is not None and prev_net is not None:
+        delta_net = full_net - prev_net
+        if should_apply_q4_delta(delta_net, net_income):
+            net_income = delta_net
+
+    if full_eps is not None and prev_eps is not None:
+        delta_eps = full_eps - prev_eps
+        if should_apply_q4_delta(delta_eps, basic_eps):
+            basic_eps = delta_eps
+
+    return nii, total_income, ppop, pbt, net_income, basic_eps
+
+
+def _should_apply_intermediate_quarter_delta(
+    target_end_date: dt.date,
+    plan: dict | None,
+    ppop: float | None,
+    pbt: float | None,
+    net_income: float | None,
+) -> bool:
+    """Apply Q2/Q3 YTD delta when a direct quarter context is missing."""
+    if _intermediate_quarter_ytd_durations(target_end_date) is None:
+        return False
+
+    plan_duration = plan.get("duration_days") if plan else None
+    if plan_duration and plan_duration <= 120:
+        return (
+            ppop is None
+            or pbt is None
+            or net_income is None
+        )
+    return True
+
+
+def _apply_intermediate_quarter_delta(
+    facts: dict,
+    file_path: str,
+    target_end_date: dt.date,
+    nii: float | None,
+    total_income: float | None,
+    ppop: float | None,
+    pbt: float | None,
+    net_income: float | None,
+    basic_eps: float | None,
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
+    """Derive Q2 or Q3 from YTD cumulative minus prior quarter's cached filing."""
+    durations = _intermediate_quarter_ytd_durations(target_end_date)
+    if durations is None:
+        return nii, total_income, ppop, pbt, net_income, basic_eps
+
+    current_duration, prior_duration = durations
+    prev_facts, prev_end_date = _load_previous_quarter_facts(
+        file_path,
+        target_end_date,
+    )
+    if not prev_facts or not prev_end_date:
+        return nii, total_income, ppop, pbt, net_income, basic_eps
+
+    return _apply_period_delta_metrics(
+        facts,
+        prev_facts,
+        target_end_date,
+        prev_end_date,
+        current_duration,
+        prior_duration,
+        nii,
+        total_income,
+        ppop,
+        pbt,
+        net_income,
+        basic_eps,
+    )
+
+
+def _apply_q4_delta_normalization(
+    facts: dict,
+    file_path: str,
+    target_end_date: dt.date,
+    nii: float | None,
+    total_income: float | None,
+    ppop: float | None,
+    pbt: float | None,
+    net_income: float | None,
+    basic_eps: float | None,
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
 ]:
     """Apply Q4 delta normalization using previous quarter's XBRL file.
 
@@ -303,112 +536,30 @@ def _apply_q4_delta_normalization(
     The Q3 YTD cumulative is obtained from the previous quarter's file
     (which must be present in the same directory).
     """
-    # Only applies to Q4 (March 31 period end)
     if not (target_end_date.month == 3 and target_end_date.day == 31):
-        return nii, total_income, ppop, pbt, net_income
+        return nii, total_income, ppop, pbt, net_income, basic_eps
 
-    quarter_code = quarter_code_from_file_path(file_path)
-    prev_code = previous_quarter_code(quarter_code) if quarter_code else None
-    prev_file = find_symbol_quarter_file(file_path, prev_code) if prev_code else None
-    if not prev_file:
-        return nii, total_income, ppop, pbt, net_income
+    prev_facts, prev_end_date = _load_previous_quarter_facts(
+        file_path,
+        target_end_date,
+    )
+    if not prev_facts or not prev_end_date:
+        return nii, total_income, ppop, pbt, net_income, basic_eps
 
-    prev_facts, _prev_contexts = extract_facts(prev_file)
-    prev_end_date = previous_quarter_end(target_end_date)
-    if not prev_end_date or not prev_facts:
-        return nii, total_income, ppop, pbt, net_income
-
-    fy_duration = (330, 380)
-    prev_duration = (240, 300)
-
-    # Extract FY cumulative values from current filing
-    full_ie = pick_cumulative_value(
-        facts, BANK_INTEREST_EARNED_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
+    return _apply_period_delta_metrics(
+        facts,
+        prev_facts,
+        target_end_date,
+        prev_end_date,
+        _FY_DURATION,
+        _NINE_MONTH_DURATION,
+        nii,
+        total_income,
+        ppop,
+        pbt,
+        net_income,
+        basic_eps,
     )
-    full_oi = pick_cumulative_value(
-        facts, OTHER_INCOME_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
-    )
-    full_ix = pick_cumulative_value(
-        facts, BANK_INTEREST_EXPENDED_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
-    )
-    full_op = pick_cumulative_value(
-        facts, BANK_OPERATING_PROFIT_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
-    )
-    full_pbt = pick_cumulative_value(
-        facts, BANK_PBT_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
-    )
-    full_net = pick_cumulative_value(
-        facts, BANK_NET_PROFIT_TAGS, _NAMESPACE_MODE,
-        target_end_date, fy_duration,
-    )
-
-    # Extract Q3 YTD cumulative values from previous quarter's filing
-    prev_ie = pick_cumulative_value(
-        prev_facts, BANK_INTEREST_EARNED_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-    prev_oi = pick_cumulative_value(
-        prev_facts, OTHER_INCOME_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-    prev_ix = pick_cumulative_value(
-        prev_facts, BANK_INTEREST_EXPENDED_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-    prev_op = pick_cumulative_value(
-        prev_facts, BANK_OPERATING_PROFIT_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-    prev_pbt = pick_cumulative_value(
-        prev_facts, BANK_PBT_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-    prev_net = pick_cumulative_value(
-        prev_facts, BANK_NET_PROFIT_TAGS, _NAMESPACE_MODE,
-        prev_end_date, prev_duration,
-    )
-
-    # Compute Q4 deltas and apply if reasonable
-    if (
-        full_ie is not None
-        and full_ix is not None
-        and prev_ie is not None
-        and prev_ix is not None
-    ):
-        # NII delta
-        q4_ie = full_ie - prev_ie
-        q4_ix = full_ix - prev_ix
-        q4_nii = q4_ie - q4_ix
-        if should_apply_q4_delta(q4_nii, nii):
-            nii = q4_nii
-
-        # Total income delta
-        q4_oi = (full_oi or 0.0) - (prev_oi or 0.0)
-        q4_total_income = q4_ie + q4_oi
-        if should_apply_q4_delta(q4_total_income, total_income):
-            total_income = q4_total_income
-
-    if full_op is not None and prev_op is not None:
-        q4_ppop = full_op - prev_op
-        if should_apply_q4_delta(q4_ppop, ppop):
-            ppop = q4_ppop
-
-    if full_pbt is not None and prev_pbt is not None:
-        q4_pbt = full_pbt - prev_pbt
-        if should_apply_q4_delta(q4_pbt, pbt):
-            pbt = q4_pbt
-
-    if full_net is not None and prev_net is not None:
-        q4_net = full_net - prev_net
-        if should_apply_q4_delta(q4_net, net_income):
-            net_income = q4_net
-
-    return nii, total_income, ppop, pbt, net_income
 
 
 def _should_apply_q4_delta(
@@ -508,20 +659,54 @@ def build_bank_metrics(
         facts, BANK_DILUTED_EPS_TAGS, plan, _NAMESPACE_MODE,
     )
 
-    # ── Q4 delta normalization ──────────────────────────────────────
-    if _should_apply_q4_delta(target_end_date, plan, ppop, pbt, net_income):
-        nii, total_income, ppop, pbt, net_income = _apply_q4_delta_normalization(
-            facts,
-            file_path,
-            target_end_date,
-            interest_earned,
-            other_income,
-            interest_expended,
+    used_intermediate_delta = False
+    # ── Q2/Q3 YTD delta (H1−Q1, 9M−H1) when no ~3-month context ───
+    if _should_apply_intermediate_quarter_delta(
+        target_end_date,
+        plan,
+        ppop,
+        pbt,
+        net_income,
+    ):
+        used_intermediate_delta = True
+        (
             nii,
             total_income,
             ppop,
             pbt,
             net_income,
+            basic_eps,
+        ) = _apply_intermediate_quarter_delta(
+            facts,
+            file_path,
+            target_end_date,
+            nii,
+            total_income,
+            ppop,
+            pbt,
+            net_income,
+            basic_eps,
+        )
+
+    # ── Q4 delta normalization ──────────────────────────────────────
+    if _should_apply_q4_delta(target_end_date, plan, ppop, pbt, net_income):
+        (
+            nii,
+            total_income,
+            ppop,
+            pbt,
+            net_income,
+            basic_eps,
+        ) = _apply_q4_delta_normalization(
+            facts,
+            file_path,
+            target_end_date,
+            nii,
+            total_income,
+            ppop,
+            pbt,
+            net_income,
+            basic_eps,
         )
 
     # ── ROA ─────────────────────────────────────────────────────────
@@ -542,6 +727,11 @@ def build_bank_metrics(
     )
 
     # Populate warnings
+    if used_intermediate_delta:
+        warnings.append(
+            "P&L derived from YTD delta vs prior-quarter file (e.g. H1−Q1); "
+            "requires prior quarter XBRL in the same output folder"
+        )
     if nii is None:
         warnings.append("NII could not be computed")
     if ppop is None:

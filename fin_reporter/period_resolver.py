@@ -10,6 +10,9 @@ financial data. Indian quarterly filings can present data in several ways:
    — Common for Q4 filings where only FY and prior YTD are available.
 
 3. **Fallback** — Use the best available context ending on the target date.
+
+Banking Q2/Q3 cross-file deltas (H1−Q1, 9M−H1) are implemented in ``metrics.banking``
+when strategy 1 finds no ~3-month context.
 """
 
 import datetime as dt
