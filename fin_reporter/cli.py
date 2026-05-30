@@ -118,11 +118,13 @@ def main() -> None:
         )
         results.extend(quarter_results)
     print_results_table(results, args.quarter)
+    downloader.ensure_api_session()
     print_metric_table(
         results,
         args.quarter,
         debug_tags=args.debug_tags,
         ebitda_definition=args.ebitda_definition,
+        market_downloader=downloader,
     )
 
 

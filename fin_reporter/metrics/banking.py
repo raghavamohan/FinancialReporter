@@ -69,22 +69,34 @@ def _normalize_ratio_to_percentage(value: float | None) -> float | None:
     return value * 100 if abs(value) <= 1 else value
 
 
-def _normalize_roa_to_percentage(
-    value: float | None,
-    duration_days: int | None,
-) -> float | None:
-    """Normalize ROA to annualized percentage.
+def _normalize_reported_roa(value: float | None) -> float | None:
+    """Normalize a disclosed ReturnOnAssets tag to a percentage.
 
-    Decimal ROA values are converted to percentages. For quarter contexts
-    (roughly 3-month durations), values are annualized by multiplying by 4.
+    Indian bank XBRL filings typically report ROA already on an annualized
+    basis (for example ``0.0107`` means 1.07%), even when the context period
+    is a single quarter. Do not apply an extra ×4 based on context duration.
     """
     if value is None:
         return None
-    if abs(value) > 1:
-        return value
+    if abs(value) <= 1:
+        return value * 100
+    return value
 
-    annualization = 4 if duration_days and duration_days <= 120 else 1
-    return value * 100 * annualization
+
+def _is_plausible_reported_roa(value: float | None) -> bool:
+    """Return True when a reported ROA looks like a real bank ratio (%)."""
+    if value is None:
+        return False
+    # Large Indian banks rarely report quarterly ROA below ~0.8%.
+    return 0.8 <= value <= 6.0
+
+
+def _computed_roa_annualization(plan: dict | None) -> int:
+    """Annualization factor for ROA computed from quarterly profit and assets."""
+    plan_duration = plan.get("duration_days") if plan else None
+    if plan_duration and plan_duration > 300:
+        return 1
+    return 4
 
 
 def _pick_reported_roa(
@@ -186,9 +198,9 @@ def _extract_bank_roa(
     """Extract or compute Return on Assets for a bank.
 
     Preference order:
-        1. Directly reported ROA tag (via plan context)
-        2. Directly reported ROA tag (via end-date, no dimensions)
-        3. Computed: (NetIncome / TotalAssets) × annualization × 100
+        1. Reported ReturnOnAssets on consolidated filing (already annualized %)
+        2. Plausible reported ROA on standalone filing (0.3–6%)
+        3. Computed: (quarterly NetIncome / TotalAssets) × annualization × 100
     """
     reported_roa: float | None = None
     reported_duration: int | None = None
@@ -218,12 +230,13 @@ def _extract_bank_roa(
                     standalone_facts,
                     target_end_date,
                 )
-                if standalone_roa not in (None, 0):
-                    reported_roa = standalone_roa
-                    reported_duration = standalone_duration
+                normalized_standalone = _normalize_reported_roa(standalone_roa)
+                if _is_plausible_reported_roa(normalized_standalone):
+                    return normalized_standalone
 
-    if reported_roa not in (None, 0):
-        return _normalize_roa_to_percentage(reported_roa, reported_duration)
+    normalized_reported = _normalize_reported_roa(reported_roa)
+    if _is_plausible_reported_roa(normalized_reported):
+        return normalized_reported
 
     # Compute ROA from Net Income and Total Assets
     total_asset_entries = select_entries(
@@ -244,8 +257,7 @@ def _extract_bank_roa(
     total_assets, _asset_entry = pick_numeric(total_asset_entries)
 
     if net_income is not None and total_assets not in (None, 0):
-        plan_duration = plan.get("duration_days") if plan else None
-        annualization = 1 if plan_duration and plan_duration > 300 else 4
+        annualization = _computed_roa_annualization(plan)
         return (net_income / total_assets) * annualization * 100
 
     return None

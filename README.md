@@ -158,6 +158,8 @@ Row sets depend on company type detected in each filing:
 | PBT | Profit before tax |
 | Net Income | |
 | Basic EPS | Not scaled to crore |
+| P/E Ratio | Share price on period end ÷ sum of basic EPS for current and prior three quarters (needs prior-quarter XBRL in `--output`) |
+| Dividend (Rs/sh) | Sum of per-share dividends from NSE corporate actions (ex-date in quarter through 90 days after period end) |
 | ROA (%) | Annualized when reported as a decimal on a quarter context |
 | Gross NPA (%) | May use standalone fallback if consolidated missing |
 | Net NPA (%) | Same fallback behavior |
@@ -172,6 +174,8 @@ Row sets depend on company type detected in each filing:
 | PBT | |
 | Net Income | |
 | Basic EPS | |
+| P/E Ratio | Same as banking row |
+| Dividend (Rs/sh) | Same as banking row |
 
 If a single run mixes banks and non-banks, a combined row layout is used (for example Revenue / NII and EBITDA / PPOP columns).
 

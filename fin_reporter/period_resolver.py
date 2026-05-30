@@ -29,6 +29,22 @@ from fin_reporter.xbrl_parser import (
 # ─── Quarter date arithmetic ────────────────────────────────────────────────
 
 
+def quarter_start_date(target_end_date: dt.date) -> dt.date | None:
+    """Return the first calendar day of the quarter ending on ``target_end_date``.
+
+    Indian fiscal quarter ends: Mar 31, Jun 30, Sep 30, Dec 31.
+    """
+    if target_end_date.month == 3:
+        return dt.date(target_end_date.year, 1, 1)
+    if target_end_date.month == 6:
+        return dt.date(target_end_date.year, 4, 1)
+    if target_end_date.month == 9:
+        return dt.date(target_end_date.year, 7, 1)
+    if target_end_date.month == 12:
+        return dt.date(target_end_date.year, 10, 1)
+    return None
+
+
 def previous_quarter_end(target_end_date: dt.date) -> dt.date | None:
     """Return the end date of the quarter preceding the given quarter end.
 

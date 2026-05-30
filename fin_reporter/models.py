@@ -46,6 +46,10 @@ class FinancialMetrics:
     net_income: float | None = None
     basic_eps: float | None = None
     diluted_eps: float | None = None
+    trailing_eps: float | None = None  # Sum of basic EPS for current + prior 3 quarters
+    share_price: float | None = None  # NSE EQ close on report period end
+    pe_ratio: float | None = None  # share_price / trailing_eps
+    quarter_dividend: float | None = None  # Sum of per-share dividends (NSE corporate actions)
 
     # ── Manufacturing-specific (Ind-AS) ─────────────────────────────
     revenue: float | None = None  # Revenue from Operations

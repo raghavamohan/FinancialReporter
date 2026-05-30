@@ -81,6 +81,12 @@ class NSEXBRLDownloader:
 
     # ─── Session management ──────────────────────────────────────────
 
+    def ensure_api_session(self) -> None:
+        """Initialize the NSE session when API calls are needed but cookies are absent."""
+        if self.session.cookies:
+            return
+        self.initialize_session()
+
     def initialize_session(self) -> None:
         """Warm up the NSE session by visiting key pages to obtain cookies.
 

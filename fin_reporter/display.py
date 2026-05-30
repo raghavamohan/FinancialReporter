@@ -7,12 +7,22 @@ Provides two main display functions:
 Also includes tag discovery debugging helpers for EBITDA component analysis.
 """
 
+import datetime as dt
+
 from fin_reporter.constants import (
     CRORE_DIVISOR,
     MANUFACTURING_DEPRECIATION_TAGS,
     MANUFACTURING_FINANCE_COST_TAGS,
     MANUFACTURING_PBT_TAGS,
     OTHER_INCOME_TAGS,
+)
+from fin_reporter.market_data import (
+    compute_pe_ratio,
+    fetch_quarter_dividend_per_share,
+    fetch_share_price_on_date,
+    format_dividend_per_share,
+    format_pe_ratio,
+    trailing_basic_eps_sum,
 )
 from fin_reporter.metrics import build_metrics_from_file
 from fin_reporter.models import DownloadResult, FinancialMetrics
@@ -254,6 +264,8 @@ def _metric_rows_for_company_types(
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
             ("Basic EPS", "basic_eps"),
+            ("P/E Ratio", "pe_ratio"),
+            ("Dividend (Rs/sh)", "quarter_dividend"),
             ("ROA (%)", "roa"),
             ("Gross NPA (%)", "gnpa_pct"),
             ("Net NPA (%)", "nnpa_pct"),
@@ -266,6 +278,8 @@ def _metric_rows_for_company_types(
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
             ("Basic EPS", "basic_eps"),
+            ("P/E Ratio", "pe_ratio"),
+            ("Dividend (Rs/sh)", "quarter_dividend"),
         ])
     else:
         metric_rows.extend([
@@ -276,9 +290,47 @@ def _metric_rows_for_company_types(
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
             ("Basic EPS", "basic_eps"),
+            ("P/E Ratio", "pe_ratio"),
+            ("Dividend (Rs/sh)", "quarter_dividend"),
             ("ROA (%)", "roa"),
         ])
     return metric_rows
+
+
+def _enrich_market_metrics(
+    metrics: FinancialMetrics,
+    file_path: str,
+    target_period: str,
+    symbol: str,
+    ebitda_definition: str,
+    market_downloader,
+) -> FinancialMetrics:
+    """Attach trailing EPS, share price, P/E, and quarterly dividend to metrics."""
+    metrics.trailing_eps = trailing_basic_eps_sum(
+        file_path,
+        target_period,
+        ebitda_definition=ebitda_definition,
+    )
+    try:
+        period_end = dt.datetime.strptime(target_period, "%d-%b-%Y").date()
+    except ValueError:
+        period_end = None
+
+    if market_downloader is not None and period_end is not None:
+        nse_symbol = market_downloader.normalize_symbol(symbol)
+        metrics.share_price = fetch_share_price_on_date(
+            market_downloader,
+            nse_symbol,
+            period_end,
+        )
+        metrics.quarter_dividend = fetch_quarter_dividend_per_share(
+            market_downloader,
+            nse_symbol,
+            period_end,
+        )
+
+    metrics.pe_ratio = compute_pe_ratio(metrics.share_price, metrics.trailing_eps)
+    return metrics
 
 
 def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
@@ -312,6 +364,10 @@ def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
     row_values["nii_mixed"] = _cr(metrics.nii) if is_bank else "-"
     row_values["ebitda_or_ppop"] = (
         _cr(metrics.ppop) if is_bank else _cr(metrics.ebitda)
+    )
+    row_values["pe_ratio"] = format_pe_ratio(metrics.pe_ratio)
+    row_values["quarter_dividend"] = format_dividend_per_share(
+        metrics.quarter_dividend
     )
     return row_values
 
@@ -373,11 +429,17 @@ def print_metric_table(
     quarter: str,
     debug_tags: bool = False,
     ebitda_definition: str = "tickertape",
+    market_downloader=None,
 ) -> None:
     """Print financial metrics in symbol or multi-quarter grouped view."""
     basis_note = (
         "Filing Basis shows the primary downloaded filing; "
-        "NPA/ROA may use standalone fallback when consolidated values are missing."
+        "NPA/ROA may use standalone fallback when consolidated values are missing. "
+        "P/E uses closing price on the report date (NSE, with Yahoo fallback) and trailing "
+        "four-quarter basic EPS "
+        "(requires prior-quarter XBRL files in the output folder). "
+        "Dividend sums per-share amounts from NSE corporate actions with ex-date in the "
+        "reporting quarter through 90 days after period end."
     )
     successful = [
         result
@@ -403,10 +465,18 @@ def print_metric_table(
         for result in successful:
             if result.symbol not in symbols:
                 symbols.append(result.symbol)
-            raw_metrics[result.symbol] = build_metrics_from_file(
+            metrics = build_metrics_from_file(
                 result.file_path,
                 result.period,
                 ebitda_definition=ebitda_definition,
+            )
+            raw_metrics[result.symbol] = _enrich_market_metrics(
+                metrics,
+                result.file_path,
+                result.period,
+                result.symbol,
+                ebitda_definition,
+                market_downloader,
             )
 
         company_types = {metrics.company_type for metrics in raw_metrics.values()}
@@ -433,11 +503,19 @@ def print_metric_table(
             quarter_label = (result.quarter_label or quarter).upper()
             if symbol not in symbols:
                 symbols.append(symbol)
+            metrics = build_metrics_from_file(
+                result.file_path,
+                result.period,
+                ebitda_definition=ebitda_definition,
+            )
             symbol_metrics.setdefault(symbol, {})[quarter_label] = (
-                build_metrics_from_file(
+                _enrich_market_metrics(
+                    metrics,
                     result.file_path,
                     result.period,
-                    ebitda_definition=ebitda_definition,
+                    symbol,
+                    ebitda_definition,
+                    market_downloader,
                 )
             )
 
