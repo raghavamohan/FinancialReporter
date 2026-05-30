@@ -80,6 +80,12 @@ def _load_cached_corporate_actions(
     return [row for row in rows if isinstance(row, dict)]
 
 
+def corporate_actions_cache_exists(cache_dir: str, symbol: str) -> bool:
+    """Return True when a non-empty corporate-actions cache file exists."""
+    rows = _load_cached_corporate_actions(cache_dir, symbol)
+    return bool(rows)
+
+
 def _save_corporate_actions_cache(
     cache_dir: str,
     symbol: str,
@@ -103,9 +109,12 @@ def fetch_corporate_actions_rows(
     downloader: NSEXBRLDownloader,
     symbol: str,
     cache_dir: str | None = None,
+    *,
+    force_refresh: bool = False,
 ) -> list[dict]:
-    """Fetch corporate actions from local cache first, then NSE."""
-    if cache_dir:
+    """Fetch dividend and other corporate actions from cache first, then NSE."""
+    cached_rows: list[dict] | None = None
+    if cache_dir and not force_refresh:
         cached_rows = _load_cached_corporate_actions(cache_dir, symbol)
         if cached_rows is not None:
             return cached_rows
@@ -115,19 +124,19 @@ def fetch_corporate_actions_rows(
     params = {"index": "equities", "symbol": symbol}
     response = downloader._api_get(url, params=params)
     if response.status_code != 200:
-        return []
+        return cached_rows or []
 
     try:
         rows = response.json()
     except ValueError:
-        return []
+        return cached_rows or []
     if not isinstance(rows, list):
-        return []
+        return cached_rows or []
 
     normalized_rows = [row for row in rows if isinstance(row, dict)]
-    if cache_dir:
+    if cache_dir and normalized_rows:
         _save_corporate_actions_cache(cache_dir, symbol, normalized_rows)
-    return normalized_rows
+    return normalized_rows if normalized_rows else (cached_rows or [])
 
 
 def _quarter_exdate_window(period_end: dt.date) -> tuple[dt.date, dt.date] | None:
@@ -331,6 +340,27 @@ def _parse_dividend_per_share(subject: str) -> float | None:
 
 def _is_dividend_subject(subject: str) -> bool:
     return "dividend" in subject.lower()
+
+
+def summarize_corporate_actions(rows: list[dict]) -> dict[str, int]:
+    """Count dividend vs other corporate-action rows in a cache payload."""
+    dividend_rows = 0
+    other_rows = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        subject = str(row.get("subject", "")).strip()
+        if not subject:
+            continue
+        if _is_dividend_subject(subject):
+            dividend_rows += 1
+        else:
+            other_rows += 1
+    return {
+        "total": len(rows),
+        "dividend": dividend_rows,
+        "other": other_rows,
+    }
 
 
 def _normalize_action_subject(subject: str) -> str:

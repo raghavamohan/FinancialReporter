@@ -2,7 +2,8 @@ r"""Prewarm local XBRL and market-data cache for Nifty 50 symbols.
 
 This script downloads the latest quarters of NSE XBRL filings for all
 Nifty 50 companies into a local output directory and also fills the
-corporate-actions JSON cache used by market data helpers.
+corporate-actions JSON cache (dividends, bonus, splits, and other
+NSE corporate-action announcements) used by market data helpers.
 
 Usage (from repository root):
 
@@ -24,7 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from fin_reporter.downloader import NSEXBRLDownloader
-from fin_reporter.market_data import fetch_corporate_actions_rows
+from fin_reporter.market_data import (
+    corporate_actions_cache_exists,
+    fetch_corporate_actions_rows,
+    summarize_corporate_actions,
+)
 from fin_reporter.models import DownloadResult
 
 # Fallback Nifty 50 constituents as NSE symbols.
@@ -159,6 +164,21 @@ def parse_args() -> argparse.Namespace:
             "for trailing EPS / P-E continuity."
         ),
     )
+    parser.add_argument(
+        "--skip-corporate-actions",
+        action="store_true",
+        help=(
+            "Skip dividend and other corporate-action cache warmup."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-corporate-actions",
+        action="store_true",
+        help=(
+            "Re-fetch corporate actions from NSE even when a local cache "
+            "file already exists."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -239,6 +259,104 @@ def write_download_reports(
             )
 
     return all_path, failed_path
+
+
+def write_corporate_actions_report(
+    rows: list[dict[str, str | int]],
+    output_dir: str,
+) -> Path:
+    """Write dividend/other corporate-actions cache summary CSV."""
+    report_dir = Path(output_dir) / ".reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = report_dir / f"prewarm_corporate_actions_{stamp}.csv"
+    headers = (
+        "symbol",
+        "status",
+        "total_rows",
+        "dividend_rows",
+        "other_rows",
+        "cache_path",
+    )
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow(
+                [
+                    row["symbol"],
+                    row["status"],
+                    row["total_rows"],
+                    row["dividend_rows"],
+                    row["other_rows"],
+                    row["cache_path"],
+                ]
+            )
+    return report_path
+
+
+def warm_corporate_actions_cache(
+    downloader: NSEXBRLDownloader,
+    symbols: list[str],
+    output_dir: str,
+    *,
+    refresh: bool = False,
+) -> list[dict[str, str | int]]:
+    """Populate local dividend/other corporate-action cache for all symbols."""
+    report_rows: list[dict[str, str | int]] = []
+
+    for idx, raw_symbol in enumerate(symbols, start=1):
+        symbol = downloader.normalize_symbol(raw_symbol)
+        cache_path = str(
+            Path(output_dir) / ".market_cache" / f"{symbol}_corporate_actions.json"
+        )
+        had_cache = corporate_actions_cache_exists(output_dir, symbol)
+        force_refresh = refresh or not had_cache
+
+        if not force_refresh:
+            cached_rows = fetch_corporate_actions_rows(
+                downloader,
+                symbol,
+                cache_dir=output_dir,
+            )
+            status = "CACHED"
+        else:
+            cached_rows = fetch_corporate_actions_rows(
+                downloader,
+                symbol,
+                cache_dir=output_dir,
+                force_refresh=True,
+            )
+            if cached_rows:
+                status = "REFRESHED" if had_cache else "DOWNLOADED"
+            elif had_cache:
+                status = "FAILED_KEEPING_CACHE"
+                cached_rows = fetch_corporate_actions_rows(
+                    downloader,
+                    symbol,
+                    cache_dir=output_dir,
+                )
+            else:
+                status = "FAILED"
+
+        summary = summarize_corporate_actions(cached_rows)
+        report_rows.append(
+            {
+                "symbol": symbol,
+                "status": status,
+                "total_rows": summary["total"],
+                "dividend_rows": summary["dividend"],
+                "other_rows": summary["other"],
+                "cache_path": cache_path,
+            }
+        )
+        print(
+            f"[*] [{idx}/{len(symbols)}] {symbol}: {status} "
+            f"(total={summary['total']}, dividend={summary['dividend']}, "
+            f"other={summary['other']})"
+        )
+
+    return report_rows
 
 
 def build_cached_results_for_quarter(
@@ -378,17 +496,31 @@ def main() -> None:
             + ", ".join(f"{k}={v}" for k, v in sorted(quarter_counter.items()))
         )
 
-    print("\n=== Corporate-actions cache warmup ===")
-    for idx, raw_symbol in enumerate(symbols, start=1):
-        symbol = downloader.normalize_symbol(raw_symbol)
-        rows = fetch_corporate_actions_rows(
+    corporate_actions_report: Path | None = None
+    if not args.skip_corporate_actions:
+        print("\n=== Corporate-actions cache warmup ===")
+        ca_needs_nse = args.refresh_corporate_actions or any(
+            not corporate_actions_cache_exists(
+                args.output,
+                downloader.normalize_symbol(raw_symbol),
+            )
+            for raw_symbol in symbols
+        )
+        if ca_needs_nse and not nse_session_initialized:
+            downloader.initialize_session()
+            nse_session_initialized = True
+        ca_report_rows = warm_corporate_actions_cache(
             downloader,
-            symbol,
-            cache_dir=args.output,
+            symbols,
+            args.output,
+            refresh=args.refresh_corporate_actions,
         )
-        print(
-            f"[*] [{idx}/{len(symbols)}] {symbol}: cached {len(rows)} rows"
+        corporate_actions_report = write_corporate_actions_report(
+            ca_report_rows,
+            args.output,
         )
+    else:
+        print("\n=== Corporate-actions cache warmup skipped ===")
 
     print("\n=== Prewarm complete ===")
     print(
@@ -399,6 +531,8 @@ def main() -> None:
     all_report, failed_report = write_download_reports(all_results, args.output)
     print(f"[+] Download report CSV: {all_report}")
     print(f"[+] Failures report CSV: {failed_report}")
+    if corporate_actions_report is not None:
+        print(f"[+] Corporate-actions report CSV: {corporate_actions_report}")
 
 
 if __name__ == "__main__":
