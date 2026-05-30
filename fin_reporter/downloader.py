@@ -18,6 +18,7 @@ import time
 
 import requests  # pyright: ignore[reportMissingModuleSource]
 
+from fin_reporter.bse_fallback import bse_pdf_only_note
 from fin_reporter.models import DownloadResult
 from fin_reporter.period_resolver import (
     previous_quarter_code,
@@ -81,6 +82,11 @@ class NSEXBRLDownloader:
         # Common legacy-to-live NSE symbol aliases.
         self.symbol_aliases = {
             "HDFC": "HDFCBANK",
+        }
+        # Additional lookup-only fallback symbols for historical filing feeds.
+        # Primary symbol naming (cache filenames, user-facing output) stays unchanged.
+        self.lookup_symbol_fallbacks = {
+            "TATAMOTORS": ("TATAMTRDVR",),
         }
 
     # ─── Session management ──────────────────────────────────────────
@@ -331,12 +337,12 @@ class NSEXBRLDownloader:
 
     # ─── Filing matching ─────────────────────────────────────────────
 
-    def _pick_matching_filing(
+    def _rank_matching_filings(
         self,
         filings: list,
         target_period: str,
         prefer_standalone: bool = False,
-    ) -> dict | None:
+    ) -> list[dict]:
         candidates = []
         for filing in filings:
             period = str(filing.get("period", "")).strip()
@@ -346,9 +352,9 @@ class NSEXBRLDownloader:
                 candidates.append(filing)
 
         if not candidates:
-            return None
+            return []
 
-        ranked = sorted(
+        return sorted(
             candidates,
             key=lambda f: (
                 (
@@ -368,7 +374,19 @@ class NSEXBRLDownloader:
                 ),
             ),
         )
-        return ranked[0]
+
+    def _pick_matching_filing(
+        self,
+        filings: list,
+        target_period: str,
+        prefer_standalone: bool = False,
+    ) -> dict | None:
+        ranked = self._rank_matching_filings(
+            filings,
+            target_period,
+            prefer_standalone=prefer_standalone,
+        )
+        return ranked[0] if ranked else None
 
     @staticmethod
     def _is_q4_target(target_period: str) -> bool:
@@ -436,14 +454,15 @@ class NSEXBRLDownloader:
 
     # ─── Filing resolution (integrated + legacy) ─────────────────────
 
-    def _resolve_filing_integrated(
+    def _resolve_integrated_candidates(
         self,
         symbol: str,
         target_period: str,
         from_date: str,
         to_date: str,
         prefer_standalone: bool = False,
-    ) -> tuple[dict | None, str]:
+        require_financial: bool = True,
+    ) -> tuple[list[dict], str]:
         params = {
             "symbol": symbol,
             "from_date": from_date,
@@ -451,7 +470,7 @@ class NSEXBRLDownloader:
         }
         response = self._api_get(self.integrated_api_url, params=params)
         if response.status_code != 200:
-            return None, f"integrated HTTP {response.status_code}"
+            return [], f"integrated HTTP {response.status_code}"
 
         filings = self._extract_filings(response.json())
         target_qe_date = self._target_qe_date(target_period)
@@ -466,14 +485,15 @@ class NSEXBRLDownloader:
             candidates.append(filing)
 
         if not candidates:
-            return None, "integrated not found"
+            return [], "integrated not found"
 
-        financial_candidates = [
-            f for f in candidates if self._is_financial_integrated_record(f)
-        ]
-        if not financial_candidates:
-            return None, "integrated financial not found"
-        candidates = financial_candidates
+        if require_financial:
+            financial_candidates = [
+                f for f in candidates if self._is_financial_integrated_record(f)
+            ]
+            if not financial_candidates:
+                return [], "integrated financial not found"
+            candidates = financial_candidates
 
         ranked = sorted(
             candidates,
@@ -492,7 +512,56 @@ class NSEXBRLDownloader:
                 -self._sort_timestamp(f.get("broadcast_Date")),
             ),
         )
-        return ranked[0], ""
+        return ranked, ""
+
+    def _resolve_filing_integrated(
+        self,
+        symbol: str,
+        target_period: str,
+        from_date: str,
+        to_date: str,
+        prefer_standalone: bool = False,
+    ) -> tuple[dict | None, str]:
+        ranked, error = self._resolve_integrated_candidates(
+            symbol,
+            target_period,
+            from_date,
+            to_date,
+            prefer_standalone=prefer_standalone,
+        )
+        if ranked:
+            return ranked[0], ""
+        return None, error
+
+    def _resolve_legacy_candidates(
+        self,
+        symbol: str,
+        target_period: str,
+        from_date: str,
+        to_date: str,
+        prefer_standalone: bool = False,
+        period: str = "Quarterly",
+    ) -> tuple[list[dict], str]:
+        params = {
+            "index": "equities",
+            "symbol": symbol,
+            "period": period,
+            "from_date": from_date,
+            "to_date": to_date,
+        }
+        response = self._api_get(self.legacy_api_url, params=params)
+        if response.status_code != 200:
+            return [], f"legacy HTTP {response.status_code}"
+
+        filings = self._extract_filings(response.json())
+        ranked = self._rank_matching_filings(
+            filings,
+            target_period,
+            prefer_standalone=prefer_standalone,
+        )
+        if not ranked:
+            return [], f"legacy {period.lower()} not found"
+        return ranked, ""
 
     def _resolve_filing_legacy(
         self,
@@ -503,26 +572,120 @@ class NSEXBRLDownloader:
         prefer_standalone: bool = False,
         period: str = "Quarterly",
     ) -> tuple[dict | None, str]:
-        params = {
-            "index": "equities",
-            "symbol": symbol,
-            "period": period,
-            "from_date": from_date,
-            "to_date": to_date,
-        }
-        response = self._api_get(self.legacy_api_url, params=params)
-        if response.status_code != 200:
-            return None, f"legacy HTTP {response.status_code}"
-
-        filings = self._extract_filings(response.json())
-        filing = self._pick_matching_filing(
-            filings,
+        ranked, error = self._resolve_legacy_candidates(
+            symbol,
             target_period,
+            from_date,
+            to_date,
             prefer_standalone=prefer_standalone,
+            period=period,
         )
-        if not filing:
-            return None, f"legacy {period.lower()} not found"
-        return filing, ""
+        if ranked:
+            return ranked[0], ""
+        return None, error
+
+    def resolve_filing_candidates_with_fallback(
+        self,
+        symbol: str,
+        target_period: str,
+        prefer_standalone: bool = False,
+    ) -> tuple[list[tuple[dict, str]], str]:
+        """Return ranked (filing, source) candidates across lookup symbols."""
+        symbol_candidates = self.candidate_lookup_symbols(symbol)
+        resolved: list[tuple[dict, str]] = []
+        seen_urls: set[str] = set()
+        all_errors: list[str] = []
+
+        def _append_candidates(
+            candidates: list[dict],
+            source: str,
+        ) -> None:
+            for filing in candidates:
+                xbrl_url = self._resolve_xbrl_url(filing)
+                if not xbrl_url or xbrl_url in seen_urls:
+                    continue
+                seen_urls.add(xbrl_url)
+                resolved.append((filing, source))
+
+        for lookup_symbol in symbol_candidates:
+            from_date, to_date = self._date_window_for_target(target_period)
+            integrated_candidates, integrated_err = (
+                self._resolve_integrated_candidates(
+                    lookup_symbol,
+                    target_period,
+                    from_date,
+                    to_date,
+                    prefer_standalone=prefer_standalone,
+                )
+            )
+            _append_candidates(integrated_candidates, "integrated")
+
+            legacy_candidates, legacy_err = self._resolve_legacy_candidates(
+                lookup_symbol,
+                target_period,
+                from_date,
+                to_date,
+                prefer_standalone=prefer_standalone,
+            )
+            _append_candidates(legacy_candidates, "legacy")
+
+            broad_from, broad_to = self._date_window_for_target(
+                target_period,
+                upper_days=180,
+            )
+            if broad_to != to_date:
+                broad_integrated, broad_integrated_err = (
+                    self._resolve_integrated_candidates(
+                        lookup_symbol,
+                        target_period,
+                        broad_from,
+                        broad_to,
+                        prefer_standalone=prefer_standalone,
+                    )
+                )
+                _append_candidates(broad_integrated, "integrated")
+
+                broad_legacy, broad_legacy_err = self._resolve_legacy_candidates(
+                    lookup_symbol,
+                    target_period,
+                    broad_from,
+                    broad_to,
+                    prefer_standalone=prefer_standalone,
+                )
+                _append_candidates(broad_legacy, "legacy")
+            else:
+                broad_integrated_err = ""
+                broad_legacy_err = ""
+
+            errors = [integrated_err, legacy_err]
+            if broad_integrated_err:
+                errors.append(broad_integrated_err)
+            if broad_legacy_err:
+                errors.append(broad_legacy_err)
+
+            if self._is_q4_target(target_period):
+                annual_candidates, annual_err = self._resolve_legacy_candidates(
+                    lookup_symbol,
+                    target_period,
+                    broad_from,
+                    broad_to,
+                    prefer_standalone=prefer_standalone,
+                    period="Annual",
+                )
+                _append_candidates(annual_candidates, "legacy-annual")
+                errors.append(annual_err)
+
+            joined_errors = "; ".join([token for token in errors if token])
+            if lookup_symbol != symbol:
+                joined_errors = (
+                    f"{lookup_symbol}: {joined_errors}" if joined_errors
+                    else f"{lookup_symbol}: not found"
+                )
+            all_errors.append(joined_errors)
+
+        if resolved:
+            return resolved, ""
+        return [], "; ".join([item for item in all_errors if item])
 
     def resolve_filing_with_fallback(
         self,
@@ -538,59 +701,15 @@ class NSEXBRLDownloader:
         Returns:
             (filing_dict, source, error_message)
         """
-        from_date, to_date = self._date_window_for_target(target_period)
-        integrated_filing, integrated_err = self._resolve_filing_integrated(
+        candidates, error = self.resolve_filing_candidates_with_fallback(
             symbol,
             target_period,
-            from_date,
-            to_date,
             prefer_standalone=prefer_standalone,
         )
-        if integrated_filing:
-            return integrated_filing, "integrated", ""
-
-        legacy_filing, legacy_err = self._resolve_filing_legacy(
-            symbol,
-            target_period,
-            from_date,
-            to_date,
-            prefer_standalone=prefer_standalone,
-        )
-        if legacy_filing:
-            return legacy_filing, "legacy", ""
-
-        errors = [integrated_err, legacy_err]
-
-        if self._is_q4_target(target_period):
-            wide_from, wide_to = self._date_window_for_target(
-                target_period,
-                upper_days=120,
-            )
-            if wide_to != to_date:
-                integrated_filing, wide_err = self._resolve_filing_integrated(
-                    symbol,
-                    target_period,
-                    wide_from,
-                    wide_to,
-                    prefer_standalone=prefer_standalone,
-                )
-                if integrated_filing:
-                    return integrated_filing, "integrated", ""
-                errors.append(wide_err)
-
-            annual_filing, annual_err = self._resolve_filing_legacy(
-                symbol,
-                target_period,
-                from_date,
-                to_date,
-                prefer_standalone=prefer_standalone,
-                period="Annual",
-            )
-            if annual_filing:
-                return annual_filing, "legacy-annual", ""
-            errors.append(annual_err)
-
-        return None, "-", "; ".join(errors)
+        if candidates:
+            filing, source = candidates[0]
+            return filing, source, ""
+        return None, "-", error
 
     # ─── Symbol helpers ──────────────────────────────────────────────
 
@@ -598,6 +717,16 @@ class NSEXBRLDownloader:
         """Normalize a symbol, applying known aliases (e.g. HDFC → HDFCBANK)."""
         cleaned = requested_symbol.upper().strip()
         return self.symbol_aliases.get(cleaned, cleaned)
+
+    def candidate_lookup_symbols(self, requested_symbol: str) -> list[str]:
+        """Return prioritized symbols to query NSE filing APIs."""
+        primary = self.normalize_symbol(requested_symbol)
+        candidates = [primary]
+        for fallback in self.lookup_symbol_fallbacks.get(primary, ()):
+            normalized_fallback = self.normalize_symbol(fallback)
+            if normalized_fallback not in candidates:
+                candidates.append(normalized_fallback)
+        return candidates
 
     # ─── Local cache ─────────────────────────────────────────────────
 
@@ -734,8 +863,33 @@ class NSEXBRLDownloader:
 
     # ─── Download ────────────────────────────────────────────────────
 
-    def _download_file(self, xbrl_url: str, output_path: str) -> str:
-        """Download a file from a URL. Returns error string or empty on success."""
+    @staticmethod
+    def _xbrl_url_variants(xbrl_url: str) -> list[str]:
+        variants = [xbrl_url.strip()]
+        if "_WEB.xml" in xbrl_url:
+            variants.append(xbrl_url.replace("_WEB.xml", ".xml"))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for variant in variants:
+            if variant and variant not in seen:
+                seen.add(variant)
+                deduped.append(variant)
+        return deduped
+
+    def _message_with_bse_pdf_note(
+        self,
+        symbol: str,
+        target_period: str,
+        message: str,
+    ) -> str:
+        """Append BSE PDF-only disclosure note for failed NSE downloads."""
+        note = bse_pdf_only_note(symbol, target_period)
+        if not note:
+            return message
+        return f"{message} | {note}"
+
+    def _download_file_once(self, xbrl_url: str, output_path: str) -> str:
+        """Download one URL. Returns error string or empty on success."""
         with self._api_get(xbrl_url, stream=True) as response:
             if response.status_code != 200:
                 return f"HTTP {response.status_code}"
@@ -744,6 +898,18 @@ class NSEXBRLDownloader:
                     if chunk:
                         output_file.write(chunk)
         return ""
+
+    def _download_file(self, xbrl_url: str, output_path: str) -> str:
+        """Download a file from a URL. Returns error string or empty on success."""
+        last_error = "HTTP unknown"
+        for candidate_url in self._xbrl_url_variants(xbrl_url):
+            download_error = self._download_file_once(candidate_url, output_path)
+            if not download_error:
+                return ""
+            last_error = download_error
+            if download_error != "HTTP 404":
+                return download_error
+        return last_error
 
     def download_for_symbols(
         self,
@@ -805,24 +971,101 @@ class NSEXBRLDownloader:
                     )
                     continue
 
-                filing, source, resolve_error = (
-                    self.resolve_filing_with_fallback(symbol, target_period)
+                candidates, resolve_error = (
+                    self.resolve_filing_candidates_with_fallback(
+                        symbol,
+                        target_period,
+                    )
                 )
-                filing_basis = (
-                    self._infer_filing_basis(filing) if filing else "unknown"
-                )
-                if not filing:
+                if not candidates:
                     results.append(
                         DownloadResult(
                             requested_symbol,
                             target_period,
                             "NOT_FOUND",
                             "-",
-                            (
-                                f"No XBRL filing for requested period under "
-                                f"symbol '{symbol}' ({resolve_error})"
+                            self._message_with_bse_pdf_note(
+                                symbol,
+                                target_period,
+                                (
+                                    f"No XBRL filing for requested period under "
+                                    f"symbol '{symbol}' ({resolve_error})"
+                                ),
                             ),
-                            source,
+                            "-",
+                            "unknown",
+                            quarter_label,
+                        )
+                    )
+                    time.sleep(self.delay_seconds)
+                    continue
+
+                downloaded = False
+                last_download_error = ""
+                last_source = "-"
+                filing: dict | None = None
+                source = "-"
+                file_path = "-"
+                filing_basis = "unknown"
+
+                for candidate_filing, candidate_source in candidates:
+                    last_source = candidate_source
+                    xbrl_url = self._resolve_xbrl_url(candidate_filing)
+                    if not xbrl_url:
+                        continue
+                    if not xbrl_url.startswith("http"):
+                        xbrl_url = self.base_url + xbrl_url
+
+                    filename = self._build_file_name(
+                        symbol,
+                        quarter_label,
+                        xbrl_url,
+                    )
+                    candidate_path = os.path.join(output_dir, filename)
+                    download_error = self._download_file(
+                        xbrl_url,
+                        candidate_path,
+                    )
+                    if download_error:
+                        last_download_error = download_error
+                        if os.path.exists(candidate_path):
+                            os.remove(candidate_path)
+                        continue
+
+                    filing = candidate_filing
+                    source = candidate_source
+                    file_path = candidate_path
+                    filing_basis = self._infer_filing_basis(candidate_filing)
+                    downloaded = True
+                    break
+
+                if not downloaded:
+                    status = "FAILED" if last_download_error else "NOT_FOUND"
+                    if last_download_error == "HTTP 404" and len(candidates) > 1:
+                        message = (
+                            f"All {len(candidates)} NSE archive URLs returned "
+                            f"HTTP 404 for symbol '{symbol}'"
+                        )
+                    elif last_download_error:
+                        message = (
+                            f"Download {last_download_error} for symbol "
+                            f"'{symbol}' via {last_source}"
+                        )
+                    else:
+                        message = f"XBRL attachment missing for symbol '{symbol}'"
+                    message = self._message_with_bse_pdf_note(
+                        symbol,
+                        target_period,
+                        message,
+                    )
+                    results.append(
+                        DownloadResult(
+                            requested_symbol,
+                            target_period,
+                            status,
+                            "-",
+                            message,
+                            last_source,
                             filing_basis,
                             quarter_label,
                         )
@@ -830,78 +1073,38 @@ class NSEXBRLDownloader:
                     time.sleep(self.delay_seconds)
                     continue
 
-                xbrl_url = self._resolve_xbrl_url(filing)
-                if not xbrl_url:
-                    results.append(
-                        DownloadResult(
-                            requested_symbol,
-                            target_period,
-                            "NOT_FOUND",
-                            "-",
-                            f"XBRL attachment missing for symbol '{symbol}'",
-                            source,
-                            filing_basis,
-                            quarter_label,
-                        )
+                file_basis = filing_basis
+                metadata = extract_filing_metadata(file_path)
+                nature = metadata.nature.strip().lower()
+                if "consolidated" in nature and "standalone" not in nature:
+                    file_basis = "consolidated"
+                elif "standalone" in nature:
+                    file_basis = "standalone"
+                results.append(
+                    DownloadResult(
+                        requested_symbol,
+                        target_period,
+                        "DOWNLOADED",
+                        file_path,
+                        (
+                            f"OK (source symbol: {symbol}, "
+                            f"endpoint: {source})"
+                        ),
+                        source,
+                        file_basis,
+                        quarter_label,
                     )
-                    time.sleep(self.delay_seconds)
-                    continue
-
-                if not xbrl_url.startswith("http"):
-                    xbrl_url = self.base_url + xbrl_url
-
-                filename = self._build_file_name(
-                    symbol, quarter_label, xbrl_url
                 )
-                file_path = os.path.join(output_dir, filename)
-                download_error = self._download_file(xbrl_url, file_path)
-                if download_error:
-                    results.append(
-                        DownloadResult(
-                            requested_symbol,
-                            target_period,
-                            "FAILED",
-                            "-",
-                            (
-                                f"Download {download_error} for symbol "
-                                f"'{symbol}' via {source}"
-                            ),
-                            source,
-                            filing_basis,
-                            quarter_label,
-                        )
+                if file_basis == "consolidated":
+                    self._ensure_standalone_companion(
+                        symbol,
+                        target_period,
+                        quarter_label,
+                        output_dir,
+                        file_basis,
                     )
-                else:
-                    file_basis = filing_basis
-                    metadata = extract_filing_metadata(file_path)
-                    nature = metadata.nature.strip().lower()
-                    if "consolidated" in nature and "standalone" not in nature:
-                        file_basis = "consolidated"
-                    elif "standalone" in nature:
-                        file_basis = "standalone"
-                    results.append(
-                        DownloadResult(
-                            requested_symbol,
-                            target_period,
-                            "DOWNLOADED",
-                            file_path,
-                            (
-                                f"OK (source symbol: {symbol}, "
-                                f"endpoint: {source})"
-                            ),
-                            source,
-                            file_basis,
-                            quarter_label,
-                        )
-                    )
-                    if file_basis == "consolidated":
-                        self._ensure_standalone_companion(
-                            symbol,
-                            target_period,
-                            quarter_label,
-                            output_dir,
-                            file_basis,
-                        )
+                time.sleep(self.delay_seconds)
+                continue
 
             except Exception as exc:
                 results.append(
