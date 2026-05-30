@@ -19,7 +19,11 @@ import time
 import requests  # pyright: ignore[reportMissingModuleSource]
 
 from fin_reporter.models import DownloadResult
-from fin_reporter.period_resolver import previous_quarter_code, previous_quarter_end
+from fin_reporter.period_resolver import (
+    previous_quarter_code,
+    previous_quarter_end,
+    trailing_eps_support_quarters,
+)
 from fin_reporter.xbrl_parser import extract_filing_metadata
 
 
@@ -212,6 +216,28 @@ class NSEXBRLDownloader:
                 break
             current_date = previous_date
         return sequence
+
+    def resolve_display_and_download_quarters(
+        self,
+        quarter: str,
+        back_quarters: int,
+    ) -> tuple[list[str], list[str]]:
+        """Return (display_quarters, download_quarters) for CLI runs.
+
+        ``download_quarters`` includes ``display_quarters`` plus up to three
+        earlier quarters required for trailing EPS / P/E on the oldest column.
+        """
+        display_quarters = self.resolve_quarter_sequence(quarter, back_quarters)
+        support_quarters = trailing_eps_support_quarters(display_quarters)
+        download_quarters: list[str] = []
+        seen: set[str] = set()
+        for label in display_quarters + support_quarters:
+            key = label.strip().upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            download_quarters.append(label)
+        return display_quarters, download_quarters
 
     # ─── Filing extraction helpers ───────────────────────────────────
 

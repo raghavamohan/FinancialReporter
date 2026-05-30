@@ -50,6 +50,7 @@ class FinancialMetrics:
     share_price: float | None = None  # NSE EQ close on report period end
     pe_ratio: float | None = None  # share_price / trailing_eps
     quarter_dividend: float | None = None  # Sum of per-share dividends (NSE corporate actions)
+    other_corporate_actions: str | None = None  # Non-dividend actions in reporting window
 
     # ── Manufacturing-specific (Ind-AS) ─────────────────────────────
     revenue: float | None = None  # Revenue from Operations

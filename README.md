@@ -81,6 +81,9 @@ Indian FY convention (examples for `FY26` = year ending 31-Mar-2026):
 
 With `--back-quarters 4` and `--quarter Q4_FY26`, the tool processes `Q4_FY26`, `Q3_FY26`, `Q2_FY26`, and `Q1_FY26` in that order.
 
+For trailing EPS and P/E, the tool also downloads up to three quarters **before** the oldest displayed quarter (not shown in the metrics table). Those appear in the download results table with `(trailing EPS support, not in metrics table)` in the message.
+Corporate actions used for dividend and bonus/split handling are cached locally under `<output>/.market_cache/` to avoid repeated NSE calls across runs.
+
 If `--quarter` is a date (for example `30-Jun-2025`), `--back-quarters` steps backward by calendar quarter ends instead of FY codes.
 
 ### Examples
@@ -158,8 +161,9 @@ Row sets depend on company type detected in each filing:
 | PBT | Profit before tax |
 | Net Income | |
 | Basic EPS | Not scaled to crore |
-| P/E Ratio | Share price on period end ÷ sum of basic EPS for current and prior three quarters (needs prior-quarter XBRL in `--output`) |
-| Dividend (Rs/sh) | Sum of per-share dividends from NSE corporate actions (ex-date in quarter through 90 days after period end) |
+| P/E Ratio | Share price on period end ÷ trailing four-quarter basic EPS, with older EPS adjusted for bonus/split ex-dates after each quarter (needs prior-quarter XBRL in `--output`) |
+| Dividend (Rs/sh) | Sum of per-share dividends from NSE corporate actions with ex-date in the reporting quarter |
+| Other Corporate Actions | Non-dividend corporate actions (bonus, split, demerger, rights, etc.) with ex-date in the reporting quarter |
 | ROA (%) | Annualized when reported as a decimal on a quarter context |
 | Gross NPA (%) | May use standalone fallback if consolidated missing |
 | Net NPA (%) | Same fallback behavior |
@@ -176,6 +180,7 @@ Row sets depend on company type detected in each filing:
 | Basic EPS | |
 | P/E Ratio | Same as banking row |
 | Dividend (Rs/sh) | Same as banking row |
+| Other Corporate Actions | Same as banking row |
 
 If a single run mixes banks and non-banks, a combined row layout is used (for example Revenue / NII and EBITDA / PPOP columns).
 

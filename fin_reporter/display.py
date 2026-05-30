@@ -8,6 +8,7 @@ Also includes tag discovery debugging helpers for EBITDA component analysis.
 """
 
 import datetime as dt
+import os
 
 from fin_reporter.constants import (
     CRORE_DIVISOR,
@@ -17,9 +18,12 @@ from fin_reporter.constants import (
     OTHER_INCOME_TAGS,
 )
 from fin_reporter.market_data import (
+    corporate_action_factor_between,
     compute_pe_ratio,
+    fetch_other_corporate_actions_summary,
     fetch_quarter_dividend_per_share,
     fetch_share_price_on_date,
+    fetch_share_restructuring_events,
     format_dividend_per_share,
     format_pe_ratio,
     trailing_basic_eps_sum,
@@ -266,6 +270,7 @@ def _metric_rows_for_company_types(
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
+            ("Other Corporate Actions", "other_corporate_actions"),
             ("ROA (%)", "roa"),
             ("Gross NPA (%)", "gnpa_pct"),
             ("Net NPA (%)", "nnpa_pct"),
@@ -280,6 +285,7 @@ def _metric_rows_for_company_types(
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
+            ("Other Corporate Actions", "other_corporate_actions"),
         ])
     else:
         metric_rows.extend([
@@ -292,9 +298,28 @@ def _metric_rows_for_company_types(
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
+            ("Other Corporate Actions", "other_corporate_actions"),
             ("ROA (%)", "roa"),
         ])
     return metric_rows
+
+
+def _latest_period_end_for_results(
+    results: list[DownloadResult],
+    symbol: str,
+) -> dt.date | None:
+    """Latest period-end date among downloaded filings for one symbol."""
+    latest: dt.date | None = None
+    for result in results:
+        if result.symbol != symbol or result.status != "DOWNLOADED":
+            continue
+        try:
+            period_end = dt.datetime.strptime(result.period, "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        if latest is None or period_end > latest:
+            latest = period_end
+    return latest
 
 
 def _enrich_market_metrics(
@@ -304,29 +329,65 @@ def _enrich_market_metrics(
     symbol: str,
     ebitda_definition: str,
     market_downloader,
+    pe_anchor_date: dt.date | None = None,
 ) -> FinancialMetrics:
     """Attach trailing EPS, share price, P/E, and quarterly dividend to metrics."""
-    metrics.trailing_eps = trailing_basic_eps_sum(
-        file_path,
-        target_period,
-        ebitda_definition=ebitda_definition,
-    )
     try:
         period_end = dt.datetime.strptime(target_period, "%d-%b-%Y").date()
     except ValueError:
         period_end = None
 
+    restructuring_events = None
+    nse_symbol = None
+    cache_dir = os.path.dirname(file_path)
     if market_downloader is not None and period_end is not None:
         nse_symbol = market_downloader.normalize_symbol(symbol)
-        metrics.share_price = fetch_share_price_on_date(
+        restructuring_events = fetch_share_restructuring_events(
+            market_downloader,
+            nse_symbol,
+            cache_dir=cache_dir,
+        )
+
+    eps_anchor = pe_anchor_date or period_end
+    metrics.trailing_eps = trailing_basic_eps_sum(
+        file_path,
+        target_period,
+        ebitda_definition=ebitda_definition,
+        restructuring_events=restructuring_events,
+        report_date=period_end,
+        eps_anchor_date=eps_anchor,
+    )
+
+    if market_downloader is not None and period_end is not None and nse_symbol:
+        share_price = fetch_share_price_on_date(
             market_downloader,
             nse_symbol,
             period_end,
+            restructuring_events=restructuring_events,
         )
+        if (
+            share_price is not None
+            and restructuring_events
+            and eps_anchor is not None
+            and period_end < eps_anchor
+        ):
+            share_price *= corporate_action_factor_between(
+                period_end,
+                eps_anchor,
+                restructuring_events,
+            )
+        metrics.share_price = share_price
         metrics.quarter_dividend = fetch_quarter_dividend_per_share(
             market_downloader,
             nse_symbol,
             period_end,
+            cache_dir=cache_dir,
+        )
+        metrics.other_corporate_actions = fetch_other_corporate_actions_summary(
+            market_downloader,
+            nse_symbol,
+            period_end,
+            cache_dir=cache_dir,
         )
 
     metrics.pe_ratio = compute_pe_ratio(metrics.share_price, metrics.trailing_eps)
@@ -368,6 +429,9 @@ def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
     row_values["pe_ratio"] = format_pe_ratio(metrics.pe_ratio)
     row_values["quarter_dividend"] = format_dividend_per_share(
         metrics.quarter_dividend
+    )
+    row_values["other_corporate_actions"] = (
+        metrics.other_corporate_actions or "-"
     )
     return row_values
 
@@ -430,21 +494,33 @@ def print_metric_table(
     debug_tags: bool = False,
     ebitda_definition: str = "tickertape",
     market_downloader=None,
+    display_quarters: list[str] | None = None,
 ) -> None:
     """Print financial metrics in symbol or multi-quarter grouped view."""
     basis_note = (
         "Filing Basis shows the primary downloaded filing; "
         "NPA/ROA may use standalone fallback when consolidated values are missing. "
-        "P/E uses closing price on the report date (NSE, with Yahoo fallback) and trailing "
-        "four-quarter basic EPS "
-        "(requires prior-quarter XBRL files in the output folder). "
+        "P/E uses closing price on the report date (NSE, with Yahoo fallback converted for "
+        "split-adjusted history) and trailing "
+        "four-quarter basic EPS adjusted for bonus/split ex-dates (multi-quarter tables use "
+        "the latest column as anchor; prior quarters are downloaded automatically when needed). "
         "Dividend sums per-share amounts from NSE corporate actions with ex-date in the "
-        "reporting quarter through 90 days after period end."
+        "reporting quarter. Other Corporate Actions shows non-dividend actions by "
+        "reporting-quarter ex-date."
+    )
+    display_labels = (
+        {token.strip().upper() for token in display_quarters}
+        if display_quarters
+        else None
     )
     successful = [
         result
         for result in results
         if result.status == "DOWNLOADED" and result.file_path != "-"
+        and (
+            display_labels is None
+            or (result.quarter_label or quarter).strip().upper() in display_labels
+        )
     ]
     if not successful:
         print(
@@ -498,11 +574,18 @@ def print_metric_table(
     else:
         symbols: list[str] = []
         symbol_metrics: dict[str, dict[str, FinancialMetrics]] = {}
+        symbol_anchors: dict[str, dt.date | None] = {}
+        for result in successful:
+            symbol = result.symbol
+            if symbol not in symbols:
+                symbols.append(symbol)
+                symbol_anchors[symbol] = _latest_period_end_for_results(
+                    successful,
+                    symbol,
+                )
         for result in successful:
             symbol = result.symbol
             quarter_label = (result.quarter_label or quarter).upper()
-            if symbol not in symbols:
-                symbols.append(symbol)
             metrics = build_metrics_from_file(
                 result.file_path,
                 result.period,
@@ -516,6 +599,7 @@ def print_metric_table(
                     symbol,
                     ebitda_definition,
                     market_downloader,
+                    pe_anchor_date=symbol_anchors.get(symbol),
                 )
             )
 
@@ -549,4 +633,9 @@ def print_metric_table(
             print(f"[Info] EBITDA definition: {ebitda_definition}")
 
     if debug_tags:
-        _print_ebitda_tag_discovery(successful)
+        debug_results = [
+            result
+            for result in results
+            if result.status == "DOWNLOADED" and result.file_path != "-"
+        ]
+        _print_ebitda_tag_discovery(debug_results)

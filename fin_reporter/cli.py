@@ -97,25 +97,45 @@ def main() -> None:
         timeout=args.timeout,
         delay_seconds=args.delay,
     )
-    selected_quarters = downloader.resolve_quarter_sequence(
-        args.quarter,
-        args.back_quarters,
+    display_quarters, download_quarters = (
+        downloader.resolve_display_and_download_quarters(
+            args.quarter,
+            args.back_quarters,
+        )
     )
+    support_quarters = [
+        label
+        for label in download_quarters
+        if label.strip().upper()
+        not in {token.strip().upper() for token in display_quarters}
+    ]
+    if support_quarters:
+        print(
+            "[*] Also fetching prior-quarter XBRL for trailing EPS / P/E: "
+            + ", ".join(support_quarters)
+        )
     if not downloader.needs_nse_access(
         symbols,
-        selected_quarters,
+        download_quarters,
         args.output,
     ):
         print("[+] All requested XBRL files found locally; skipping NSE session.")
     else:
         downloader.initialize_session()
     results = []
-    for quarter in selected_quarters:
+    display_set = {token.strip().upper() for token in display_quarters}
+    for quarter in download_quarters:
         quarter_results = downloader.download_for_symbols(
             symbols,
             quarter,
             args.output,
         )
+        for result in quarter_results:
+            quarter_label = (result.quarter_label or quarter).strip().upper()
+            if quarter_label not in display_set and result.status == "DOWNLOADED":
+                result.message = (
+                    f"{result.message} (trailing EPS support, not in metrics table)"
+                )
         results.extend(quarter_results)
     print_results_table(results, args.quarter)
     downloader.ensure_api_session()
@@ -125,6 +145,7 @@ def main() -> None:
         debug_tags=args.debug_tags,
         ebitda_definition=args.ebitda_definition,
         market_downloader=downloader,
+        display_quarters=display_quarters,
     )
 
 

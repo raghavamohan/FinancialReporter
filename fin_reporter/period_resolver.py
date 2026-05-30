@@ -77,6 +77,68 @@ def quarter_code_from_file_path(file_path: str) -> str | None:
     return match.group(1).upper()
 
 
+_QUARTER_CODE_PATTERN = re.compile(r"^Q[1-4]_FY(\d{2}|\d{4})$", re.IGNORECASE)
+_PERIOD_DATE_PATTERN = re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$")
+_TRAILING_EPS_PRIOR_QUARTERS = 3
+
+
+def trailing_eps_support_quarters(display_quarters: list[str]) -> list[str]:
+    """Return extra quarter labels to download for trailing EPS (not for display).
+
+    ``display_quarters`` is ordered newest-to-oldest (as from ``resolve_quarter_sequence``).
+    Adds up to three quarters before the oldest displayed quarter when using quarter
+    codes or period-end date strings.
+    """
+    if not display_quarters:
+        return []
+
+    normalized = [token.strip() for token in display_quarters if token.strip()]
+    quarter_codes = [
+        token.upper()
+        for token in normalized
+        if _QUARTER_CODE_PATTERN.fullmatch(token.upper())
+    ]
+    if quarter_codes:
+        display_set = set(quarter_codes)
+        support: list[str] = []
+        current = quarter_codes[-1]
+        for _ in range(_TRAILING_EPS_PRIOR_QUARTERS):
+            previous = previous_quarter_code(current)
+            if previous is None:
+                break
+            current = previous
+            if previous not in display_set and previous not in support:
+                support.append(previous)
+        return support
+
+    period_dates: list[dt.date] = []
+    display_period_labels: set[str] = set()
+    for token in normalized:
+        if not _PERIOD_DATE_PATTERN.fullmatch(token):
+            continue
+        try:
+            parsed = dt.datetime.strptime(token, "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        period_dates.append(parsed)
+        display_period_labels.add(parsed.strftime("%d-%b-%Y").upper())
+
+    if not period_dates:
+        return []
+
+    support: list[str] = []
+    current = min(period_dates)
+    for _ in range(_TRAILING_EPS_PRIOR_QUARTERS):
+        previous = previous_quarter_end(current)
+        if previous is None:
+            break
+        current = previous
+        label = current.strftime("%d-%b-%Y")
+        if label.upper() not in display_period_labels and label not in support:
+            support.append(label)
+    return support
+
+
 def previous_quarter_code(quarter_code: str) -> str | None:
     """Return the quarter code for the preceding quarter.
 
@@ -101,17 +163,22 @@ def previous_quarter_code(quarter_code: str) -> str | None:
 
 
 def find_symbol_quarter_file(file_path: str, quarter_code: str) -> str | None:
-    """Find the cached XBRL file for a given symbol and quarter code."""
+    """Find the cached XBRL file for a given symbol and quarter or period label."""
     basename = os.path.basename(file_path)
     parts = basename.split("_", 1)
     if len(parts) < 2:
         return None
     symbol = parts[0]
     directory = os.path.dirname(file_path)
-    for ext in (".xml", ".xbrl", ".zip"):
-        candidate = os.path.join(directory, f"{symbol}_{quarter_code}_XBRL{ext}")
-        if os.path.exists(candidate):
-            return candidate
+    label = quarter_code.strip()
+    candidates = [label, label.upper()]
+    if _QUARTER_CODE_PATTERN.fullmatch(label.upper()):
+        candidates = [label.upper()]
+    for name in candidates:
+        for ext in (".xml", ".xbrl", ".zip"):
+            candidate = os.path.join(directory, f"{symbol}_{name}_XBRL{ext}")
+            if os.path.exists(candidate):
+                return candidate
     return None
 
 
