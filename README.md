@@ -1,29 +1,31 @@
 # FinancialReporter
 
-Command-line tool that downloads quarterly financial result filings in XBRL format from the [National Stock Exchange of India (NSE)](https://www.nseindia.com/) and prints key metrics in terminal tables.
+Command-line tool that downloads quarterly financial result filings in XBRL format from the [National Stock Exchange of India (NSE)](https://www.nseindia.com/) and prints download status and financial metrics in terminal tables.
 
-It is aimed at Indian listed companies: symbols are NSE tickers (for example `RELIANCE`, `HDFCBANK`, `ITC`). The tool fetches filings when needed, caches XML under a local folder, parses XBRL facts, and computes quarter-level metrics. Banks and non-bank (manufacturing / Ind-AS) filers are detected automatically from the filing content.
+Symbols are NSE tickers (for example `RELIANCE`, `HDFCBANK`, `ITC`). The tool fetches filings when needed, caches files under a local folder, parses XBRL facts, and computes quarter-level metrics. **Banks** (IN-GAAP) and **manufacturing** companies (Ind-AS) are detected automatically from filing tags.
 
 ## Features
 
-- Downloads XBRL from NSE integrated and legacy financial-results APIs, with automatic fallback
-- Skips NSE session setup when all requested files are already on disk
-- Resolves Indian fiscal quarters (`Q1_FY26` … `Q4_FY26`) or explicit period-end dates (`31-Mar-2026`)
-- Supports multiple symbols and multiple quarters in one run (`--back-quarters`)
-- **Banks:** Net interest income (as Revenue), PPOP (as EBITDA/Op. profit), PBT, net income, EPS, ROA
-- **Manufacturing:** Revenue, EBITDA, PBIT, PBT, net income, EPS (ROA shown as N/A)
-- Optional EBITDA definition and XBRL tag debugging for non-bank filers
+- Downloads XBRL from NSE **integrated** and **legacy** financial-results APIs, with automatic fallback
+- Reuses cached files when present; skips NSE session warmup when nothing new is required
+- Fetches a **standalone** companion filing when consolidated is cached but standalone is needed (for example NPA / ROA)
+- Resolves Indian fiscal quarters (`Q1_FY26` … `Q4_FY26`, two- or four-digit FY) or explicit period-end dates (`31-Mar-2026`)
+- Multiple symbols and multiple quarters per run (`--back-quarters`)
+- **Q4 handling:** derives quarter figures from cumulative contexts when direct quarter tags are missing; banks can use FY − prior YTD when earlier-quarter files exist in the same output folder
+- Configurable manufacturing **EBITDA** formula and optional XBRL tag discovery for debugging
 
 ## Requirements
 
 - Python 3.10+ (3.12 tested)
-- Network access to NSE (downloads only; no API key)
+- [requests](https://pypi.org/project/requests/) (see `requirements.txt`)
+- Network access to NSE for downloads (no API key)
 
 ## Installation
 
 Clone the repository and install dependencies:
 
 ```powershell
+git clone https://github.com/raghavamohan/FinancialReporter.git
 cd FinancialReporter
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -42,18 +44,44 @@ python fin_report.py --symbols RELIANCE HDFCBANK --quarter Q4_FY26
 python -m fin_reporter --symbols RELIANCE ITC SBIN --quarter Q3_FY26
 ```
 
+Symbols are uppercased automatically. The alias `HDFC` is normalized to `HDFCBANK` for NSE lookups.
+
 ### Arguments
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `--symbols` | Yes | — | One or more NSE symbols (space-separated) |
-| `--quarter` | Yes | — | Quarter code (`Q4_FY26`) or period end (`31-Mar-2026`) |
-| `--back-quarters` | No | `1` | How many quarters to process, counting back from `--quarter` (includes that quarter) |
-| `--output` | No | `.\xbrl_downloads` | Folder where XBRL files are saved |
+| `--quarter` | Yes | — | Quarter code (`Q4_FY26`, `Q4_FY2026`) or period end (`31-Mar-2026`) |
+| `--back-quarters` | No | `1` | Quarters to process, counting back from `--quarter` (includes that quarter). Newest first. |
+| `--output` | No | `.\xbrl_downloads` | Directory for cached XBRL files |
 | `--timeout` | No | `20` | HTTP timeout per request (seconds) |
 | `--delay` | No | `2.0` | Pause between symbol requests (seconds) |
-| `--ebitda-definition` | No | `tickertape` | Manufacturing EBITDA: `tickertape` or `subtract-other-income` |
-| `--debug-tags` | No | off | Print candidate XBRL tags used for EBITDA-related fields |
+| `--ebitda-definition` | No | `tickertape` | Manufacturing EBITDA only (see below) |
+| `--debug-tags` | No | off | Print candidate XBRL tags for EBITDA-related fields (manufacturing) |
+
+#### `--ebitda-definition` (manufacturing only)
+
+| Value | Formula (simplified) |
+|-------|----------------------|
+| `tickertape` | Prefer segment PBT + segment finance cost + depreciation; otherwise PBT (pre-exceptional where available) + finance cost + depreciation |
+| `subtract-other-income` | Same base components, then subtract **Other Income** |
+
+Banks do not use EBITDA; this flag applies only when manufacturing filers are in the run.
+
+### Quarter codes
+
+Indian FY convention (examples for `FY26` = year ending 31-Mar-2026):
+
+| Code | Period end |
+|------|------------|
+| `Q1_FY26` | 30-Jun-2025 |
+| `Q2_FY26` | 30-Sep-2025 |
+| `Q3_FY26` | 31-Dec-2025 |
+| `Q4_FY26` | 31-Mar-2026 |
+
+With `--back-quarters 4` and `--quarter Q4_FY26`, the tool processes `Q4_FY26`, `Q3_FY26`, `Q2_FY26`, and `Q1_FY26` in that order.
+
+If `--quarter` is a date (for example `30-Jun-2025`), `--back-quarters` steps backward by calendar quarter ends instead of FY codes.
 
 ### Examples
 
@@ -63,7 +91,7 @@ Single quarter, two companies:
 python fin_report.py --symbols RELIANCE HDFCBANK --quarter Q4_FY26
 ```
 
-Last four quarters for one symbol:
+Last four quarters for one symbol (one metrics table per symbol, columns = quarters):
 
 ```powershell
 python -m fin_reporter --symbols ITC --quarter Q4_FY26 --back-quarters 4
@@ -75,50 +103,126 @@ Custom download directory and slower requests (helps avoid NSE rate limits):
 python fin_report.py --symbols SBIN ICICIBANK --quarter Q2_FY26 --output D:\data\xbrl --delay 3
 ```
 
-Manufacturing EBITDA excluding other income, with tag discovery:
+Manufacturing EBITDA and tag debugging:
 
 ```powershell
 python fin_report.py --symbols RELIANCE --quarter Q3_FY26 --ebitda-definition subtract-other-income --debug-tags
 ```
 
-Re-run without hitting NSE (files already in `--output`):
+Use cache only (no NSE session if every required file is already present):
 
 ```powershell
 python fin_report.py --symbols RELIANCE --quarter Q4_FY26 --output .\xbrl_downloads
 ```
 
-If every symbol/quarter file exists locally, you will see: `All requested XBRL files found locally; skipping NSE session.`
+When all primary (and any required standalone) files exist locally:
+
+```text
+[+] All requested XBRL files found locally; skipping NSE session.
+```
+
+Cached hits still appear as `DOWNLOADED` with source `cached` in the results table.
 
 ## Output
 
-1. **Download results table** — per symbol/quarter: period, consolidated vs standalone basis, status (`DOWNLOADED`, `NOT_FOUND`, `FAILED`, `ERROR`), API source, file path, and message.
-2. **Financial metrics table** — amounts in ₹ crore where applicable; banks use NII/PPOP labels, manufacturing uses revenue/EBITDA/PBIT.
+### 1. Download results table
 
-Quarter codes follow Indian FY convention: `Q4_FY26` is the quarter ending 31-Mar-2026; `Q1_FY26` ends 30-Jun-2025, and so on.
+Per symbol and quarter: period, filing basis (`consolidated` / `standalone` / `unknown`), status, API source, file path, and message.
+
+| Status | Meaning |
+|--------|---------|
+| `DOWNLOADED` | File available (fresh download or cache) |
+| `NOT_FOUND` | No matching XBRL on NSE for that symbol/period |
+| `FAILED` | Filing found but download failed |
+| `ERROR` | Unexpected error during processing |
+
+Source is typically `integrated`, `legacy`, or `cached`.
+
+### 2. Financial metrics tables
+
+Monetary amounts are labeled **Rs Cr** (₹ crore). Only rows with `DOWNLOADED` files are included.
+
+**Single quarter** (`--back-quarters 1`): one table; **columns = symbols**.
+
+**Multiple quarters** (`--back-quarters` > 1 with quarter codes): **one table per symbol**; **columns = quarters**.
+
+Row sets depend on company type detected in each filing:
+
+**Banking (IN-GAAP)**
+
+| Parameter | Notes |
+|-----------|--------|
+| Net Interest Income | Interest earned − interest expended |
+| Total Income | Interest earned + other income |
+| PPOP | Pre-provision operating profit |
+| PBT | Profit before tax |
+| Net Income | |
+| Basic EPS | Not scaled to crore |
+| ROA (%) | Annualized when reported as a decimal on a quarter context |
+| Gross NPA (%) | May use standalone fallback if consolidated missing |
+| Net NPA (%) | Same fallback behavior |
+
+**Manufacturing (Ind-AS)**
+
+| Parameter | Notes |
+|-----------|--------|
+| Revenue from Operations | |
+| EBITDA | See `--ebitda-definition` |
+| PBIT | PBT + finance cost (EBIT) |
+| PBT | |
+| Net Income | |
+| Basic EPS | |
+
+If a single run mixes banks and non-banks, a combined row layout is used (for example Revenue / NII and EBITDA / PPOP columns).
+
+After manufacturing tables, the CLI prints which EBITDA definition was used. With `--debug-tags`, tag discovery runs after the metrics tables.
 
 ## Project layout
 
 ```
 FinancialReporter/
-├── fin_report.py          # Thin CLI wrapper
+├── fin_report.py              # CLI wrapper → fin_reporter.cli
 ├── fin_reporter/
-│   ├── cli.py             # Argument parsing and main flow
-│   ├── downloader.py      # NSE session and XBRL download
-│   ├── xbrl_parser.py     # XBRL fact extraction
-│   ├── period_resolver.py # Quarter contexts and Q4 deltas
-│   ├── display.py         # Console tables
-│   └── metrics/           # Bank vs manufacturing calculators
+│   ├── __main__.py            # python -m fin_reporter
+│   ├── cli.py                 # Arguments and orchestration
+│   ├── constants.py           # XBRL tag mappings
+│   ├── models.py              # DownloadResult, FinancialMetrics, …
+│   ├── downloader.py          # NSE session and downloads
+│   ├── xbrl_parser.py         # XBRL parsing and metadata
+│   ├── period_resolver.py     # Quarter contexts and Q4 deltas
+│   ├── display.py             # Console tables
+│   └── metrics/
+│       ├── base.py            # Bank vs manufacturing detection
+│       ├── banking.py         # IN-GAAP metrics
+│       └── manufacturing.py   # Ind-AS metrics and EBITDA
 ├── requirements.txt
-└── xbrl_downloads/        # Default cache (gitignored; created at runtime)
+├── LICENSE                    # Apache License 2.0
+└── xbrl_downloads/            # Default cache (gitignored; created at runtime)
+```
+
+## Programmatic use
+
+The package can be imported for parsing and metrics without running the CLI. `NSEXBRLDownloader` requires `requests`.
+
+```python
+from fin_reporter.metrics import build_metrics_from_file
+
+metrics = build_metrics_from_file(
+    "xbrl_downloads/RELIANCE_Q4_FY26_XBRL.xml",
+    "31-Mar-2026",
+    ebitda_definition="tickertape",
+)
+print(metrics.company_type, metrics.revenue, metrics.ebitda)
 ```
 
 ## Notes and limitations
 
-- NSE may block or throttle automated access; use `--delay` and retry if downloads fail.
-- Not every symbol/quarter has an XBRL filing on NSE; missing filings appear as `NOT_FOUND` in the results table.
-- Metrics depend on tags present in each filing; warnings may appear when expected tags are missing.
-- Cached XBRL under `xbrl_downloads/` is not committed to the repository; delete files to force a fresh download.
+- NSE may block or throttle automated access; increase `--delay` and retry if downloads fail.
+- Not every symbol/quarter has XBRL on NSE; missing filings show as `NOT_FOUND`.
+- Metrics depend on tags in each filing; missing values appear as `-` in the table.
+- Delete cached files under `--output` to force a fresh download.
+- This tool is for research and education; verify figures against official filings before any investment or compliance use.
 
 ## License
 
-No license file is included yet. Add one if you plan to distribute or open-source the project further.
+Licensed under the [Apache License, Version 2.0](LICENSE).
