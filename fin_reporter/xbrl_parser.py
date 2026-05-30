@@ -15,6 +15,7 @@ Key concepts:
 
 import datetime as dt
 import zipfile
+from collections import Counter
 from xml.etree import ElementTree as ET
 
 from fin_reporter.constants import (
@@ -190,6 +191,76 @@ def extract_context_metadata(root: ET.Element) -> dict:
     return metadata
 
 
+def _synthesize_missing_contexts(
+    root: ET.Element,
+    contexts: dict,
+) -> dict:
+    """Create metadata for missing base context refs (e.g. OneD/OneI).
+
+    Some filings reference non-dimensional contexts like ``OneD`` in facts but
+    omit the corresponding ``<context id="OneD">`` block. To recover such
+    filings, infer a representative period from existing context metadata:
+    - ``*D`` refs use the most common (start_date, end_date) duration pair.
+    - ``*I`` refs use the most common instant_date.
+    """
+    known_refs = set(contexts.keys())
+    missing_refs: set[str] = set()
+
+    for elem in root.iter():
+        if len(elem):
+            continue
+        text = (elem.text or "").strip()
+        if not text:
+            continue
+        context_ref = elem.attrib.get("contextRef", "").strip()
+        if context_ref and context_ref not in known_refs:
+            missing_refs.add(context_ref)
+
+    if not missing_refs:
+        return {}
+
+    duration_counter: Counter[tuple[dt.date, dt.date]] = Counter()
+    instant_counter: Counter[dt.date] = Counter()
+    for meta in contexts.values():
+        start = meta.get("start_date")
+        end = meta.get("end_date")
+        instant = meta.get("instant_date")
+        if start and end:
+            duration_counter[(start, end)] += 1
+        if instant:
+            instant_counter[instant] += 1
+
+    default_duration = (
+        duration_counter.most_common(1)[0][0] if duration_counter else None
+    )
+    default_instant = instant_counter.most_common(1)[0][0] if instant_counter else None
+
+    synthesized: dict[str, dict] = {}
+    for ref in missing_refs:
+        ref_upper = ref.upper()
+        if ref_upper.endswith("D") and default_duration:
+            start, end = default_duration
+            synthesized[ref] = {
+                "is_consolidated": False,
+                "has_dimensions": False,
+                "duration_days": (end - start).days + 1,
+                "start_date": start,
+                "end_date": end,
+                "instant_date": None,
+            }
+        elif ref_upper.endswith("I") and default_instant:
+            synthesized[ref] = {
+                "is_consolidated": False,
+                "has_dimensions": False,
+                "duration_days": None,
+                "start_date": None,
+                "end_date": None,
+                "instant_date": default_instant,
+            }
+
+    return synthesized
+
+
 # ─── Fact extraction ─────────────────────────────────────────────────────────
 
 
@@ -214,6 +285,7 @@ def extract_facts(file_path: str) -> tuple[dict, dict]:
         return {}, {}
 
     contexts = extract_context_metadata(root)
+    contexts.update(_synthesize_missing_contexts(root, contexts))
     has_explicit_consolidated = any(
         ctx["is_consolidated"] for ctx in contexts.values()
     )
