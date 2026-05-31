@@ -12,3 +12,4 @@ env/
 .env
 *.log
 xbrl_downloads/
+xbrl_downloads_test/

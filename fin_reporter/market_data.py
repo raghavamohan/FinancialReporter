@@ -448,13 +448,70 @@ def fetch_quarter_dividend_per_share(
     return total if found else None
 
 
+def _share_prices_cache_path(cache_dir: str, symbol: str) -> str:
+    safe_symbol = symbol.upper().strip()
+    cache_root = os.path.join(cache_dir, _CORPORATE_ACTIONS_CACHE_DIR)
+    os.makedirs(cache_root, exist_ok=True)
+    return os.path.join(cache_root, f"{safe_symbol}_share_prices.json")
+
+
+def _load_cached_share_prices(cache_dir: str, symbol: str) -> dict[str, float] | None:
+    path = _share_prices_cache_path(cache_dir, symbol)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            payload = json.load(source)
+        return payload.get("prices", {})
+    except (OSError, ValueError):
+        return None
+
+
+def _save_share_prices_cache(cache_dir: str, symbol: str, prices: dict[str, float]) -> None:
+    path = _share_prices_cache_path(cache_dir, symbol)
+    payload = {
+        "symbol": symbol.upper().strip(),
+        "saved_at_utc": dt.datetime.utcnow().isoformat(timespec="seconds"),
+        "prices": prices,
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as target:
+            json.dump(payload, target, ensure_ascii=True)
+    except OSError:
+        return
+
+
 def fetch_share_price_on_date(
     downloader: NSEXBRLDownloader,
     symbol: str,
     as_of_date: dt.date,
     restructuring_events: list[tuple[dt.date, float]] | None = None,
+    cache_dir: str | None = None,
 ) -> float | None:
-    """Return NSE EQ close on ``as_of_date``, or the last trading day on/before it."""
+    """Return NSE EQ close on ``as_of_date``, or the last trading day on/before it, using local cache first."""
+    date_str = as_of_date.isoformat()
+    cached_prices = None
+    if cache_dir:
+        cached_prices = _load_cached_share_prices(cache_dir, symbol)
+        if cached_prices and date_str in cached_prices:
+            return cached_prices[date_str]
+
+    price = _fetch_share_price_raw(downloader, symbol, as_of_date, restructuring_events)
+    if price is not None and cache_dir:
+        if cached_prices is None:
+            cached_prices = {}
+        cached_prices[date_str] = price
+        _save_share_prices_cache(cache_dir, symbol, cached_prices)
+    return price
+
+
+def _fetch_share_price_raw(
+    downloader: NSEXBRLDownloader,
+    symbol: str,
+    as_of_date: dt.date,
+    restructuring_events: list[tuple[dt.date, float]] | None = None,
+) -> float | None:
+    """Return NSE EQ close on ``as_of_date``, or the last trading day on/before it (raw request logic)."""
     downloader.ensure_api_session()
     lookback_start = as_of_date - dt.timedelta(days=14)
     from_str = lookback_start.strftime("%d-%m-%Y")

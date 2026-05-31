@@ -264,42 +264,54 @@ def _metric_rows_for_company_types(
         metric_rows.extend([
             ("Net Interest Income", "nii"),
             ("Total Income", "total_income"),
+            ("Cost-to-Income Ratio (%)", "cost_to_income"),
             ("PPOP", "ppop"),
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
+            ("P/B Ratio", "pb_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
-            ("Other Corporate Actions", "other_corporate_actions"),
+            ("ROE (%)", "roe"),
             ("ROA (%)", "roa"),
             ("Gross NPA (%)", "gnpa_pct"),
             ("Net NPA (%)", "nnpa_pct"),
+            ("Other Corporate Actions", "other_corporate_actions"),
         ])
     elif company_types == {"manufacturing"}:
         metric_rows.extend([
             ("Revenue from Operations", "revenue"),
+            ("Gross Profit", "gross_profit"),
+            ("Gross Margin (%)", "gross_margin"),
             ("EBITDA", "ebitda"),
+            ("EBITDA Margin (%)", "ebitda_margin"),
             ("PBIT", "pbit"),
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
+            ("Net Profit Margin (%)", "net_margin"),
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
+            ("P/B Ratio", "pb_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
+            ("ROE (%)", "roe"),
+            ("ROCE (%)", "roce"),
+            ("ROA (%)", "roa"),
             ("Other Corporate Actions", "other_corporate_actions"),
         ])
     else:
         metric_rows.extend([
-            ("Revenue", "revenue_or_nii"),
-            ("NII", "nii_mixed"),
+            ("Revenue / Total Income", "revenue_or_nii"),
             ("EBITDA / PPOP", "ebitda_or_ppop"),
             ("PBIT", "pbit"),
             ("PBT", "pbt"),
             ("Net Income", "net_income"),
             ("Basic EPS", "basic_eps"),
             ("P/E Ratio", "pe_ratio"),
+            ("P/B Ratio", "pb_ratio"),
             ("Dividend (Rs/sh)", "quarter_dividend"),
-            ("Other Corporate Actions", "other_corporate_actions"),
+            ("ROE (%)", "roe"),
             ("ROA (%)", "roa"),
+            ("Other Corporate Actions", "other_corporate_actions"),
         ])
     return metric_rows
 
@@ -364,6 +376,7 @@ def _enrich_market_metrics(
             nse_symbol,
             period_end,
             restructuring_events=restructuring_events,
+            cache_dir=cache_dir,
         )
         if (
             share_price is not None
@@ -391,6 +404,16 @@ def _enrich_market_metrics(
         )
 
     metrics.pe_ratio = compute_pe_ratio(metrics.share_price, metrics.trailing_eps)
+
+    # Compute P/B Ratio
+    if metrics.share_price is not None and metrics.equity is not None and metrics.equity > 0:
+        if metrics.net_income is not None and metrics.basic_eps not in (None, 0):
+            implied_shares = abs(metrics.net_income) / abs(metrics.basic_eps)
+            if implied_shares > 0:
+                bvps = metrics.equity / implied_shares
+                if bvps > 0:
+                    metrics.pb_ratio = metrics.share_price / bvps
+
     return metrics
 
 
@@ -415,10 +438,19 @@ def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
     row_values["nii"] = _cr(metrics.nii)
     row_values["total_income"] = _cr(metrics.total_income)
     row_values["ppop"] = _cr(metrics.ppop)
-    row_values["roa"] = _raw(metrics.roa) if is_bank else "-"
+    row_values["roa"] = _raw(metrics.roa)
     row_values["gnpa_pct"] = _raw(metrics.gnpa_pct)
     row_values["nnpa_pct"] = _raw(metrics.nnpa_pct)
     row_values["filing_basis"] = metrics.filing_nature or "Unknown"
+
+    row_values["gross_profit"] = _cr(metrics.gross_profit) if not is_bank else "-"
+    row_values["gross_margin"] = _raw(metrics.gross_margin) if not is_bank else "-"
+    row_values["ebitda_margin"] = _raw(metrics.ebitda_margin) if not is_bank else "-"
+    row_values["net_margin"] = _raw(metrics.net_margin) if not is_bank else "-"
+    row_values["roe"] = _raw(metrics.roe)
+    row_values["roce"] = _raw(metrics.roce) if not is_bank else "-"
+    row_values["cost_to_income"] = _raw(metrics.cost_to_income) if is_bank else "-"
+
     row_values["revenue_or_nii"] = (
         _cr(metrics.total_income) if is_bank else _cr(metrics.revenue)
     )
@@ -427,6 +459,7 @@ def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
         _cr(metrics.ppop) if is_bank else _cr(metrics.ebitda)
     )
     row_values["pe_ratio"] = format_pe_ratio(metrics.pe_ratio)
+    row_values["pb_ratio"] = _raw(metrics.pb_ratio)
     row_values["quarter_dividend"] = format_dividend_per_share(
         metrics.quarter_dividend
     )

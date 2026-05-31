@@ -114,7 +114,7 @@ def main() -> None:
             "[*] Also fetching prior-quarter XBRL for trailing EPS / P/E: "
             + ", ".join(support_quarters)
         )
-    if not downloader.needs_nse_access(
+    if downloader.all_requested_files_cached(
         symbols,
         download_quarters,
         args.output,
@@ -138,7 +138,6 @@ def main() -> None:
                 )
         results.extend(quarter_results)
     print_results_table(results, args.quarter)
-    downloader.ensure_api_session()
     print_metric_table(
         results,
         args.quarter,

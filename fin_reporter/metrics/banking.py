@@ -32,6 +32,9 @@ from fin_reporter.constants import (
     BANK_ROA_TAGS,
     BANK_TOTAL_ASSETS_TAGS,
     OTHER_INCOME_TAGS,
+    BANK_EQUITY_SHARE_CAPITAL_TAGS,
+    BANK_RESERVES_AND_SURPLUS_TAGS,
+    BANK_OPERATING_EXPENSES_TAGS,
 )
 from fin_reporter.metrics.base import should_apply_q4_delta
 from fin_reporter.models import FinancialMetrics
@@ -188,6 +191,79 @@ def _pick_npa_from_facts(
     return gnpa, nnpa
 
 
+def _pick_bank_instant_value(
+    facts: dict,
+    tags: tuple[str, ...],
+    target_date: dt.date,
+) -> float | None:
+    """Extract a numeric value for an instant bank balance sheet tag."""
+    entries = select_entries(
+        facts,
+        tags,
+        namespace_mode=_NAMESPACE_MODE,
+        instant_date=target_date,
+        no_dimensions=True,
+    )
+    if not entries:
+        entries = select_entries(
+            facts,
+            tags,
+            namespace_mode=_NAMESPACE_MODE,
+            end_date=target_date,
+            no_dimensions=True,
+        )
+    value, _entry = pick_numeric(entries)
+    return value
+
+
+def _extract_bank_equity(facts: dict, target_date: dt.date) -> float | None:
+    """Compute Total Equity for a bank from Share Capital and Reserves & Surplus."""
+    cap = _pick_bank_instant_value(facts, BANK_EQUITY_SHARE_CAPITAL_TAGS, target_date)
+    res = _pick_bank_instant_value(facts, BANK_RESERVES_AND_SURPLUS_TAGS, target_date)
+    if cap is not None or res is not None:
+        return (cap or 0.0) + (res or 0.0)
+    return None
+
+
+def _extract_bank_balance_sheet_with_fallback(
+    facts: dict,
+    file_path: str,
+    target_end_date: dt.date,
+) -> tuple[float | None, float | None]:
+    """Extract bank Total Assets and Equity with prior-quarter file fallback."""
+    assets = _pick_bank_instant_value(facts, BANK_TOTAL_ASSETS_TAGS, target_end_date)
+    equity = _extract_bank_equity(facts, target_end_date)
+
+    if assets is not None and equity is not None:
+        return assets, equity
+
+    # Fallback to prior quarters' files (up to 3 quarters back)
+    quarter_code = quarter_code_from_file_path(file_path) if file_path else None
+    current_code = quarter_code
+    current_date = target_end_date
+
+    for _ in range(3):
+        prev_code = previous_quarter_code(current_code) if current_code else None
+        prev_file = find_symbol_quarter_file(file_path, prev_code) if prev_code and file_path else None
+        prev_end_date = previous_quarter_end(current_date)
+        if not prev_end_date:
+            break
+
+        current_code = prev_code
+        current_date = prev_end_date
+
+        if prev_file and os.path.exists(prev_file):
+            prev_facts, _ = extract_facts(prev_file)
+            if prev_facts:
+                prev_assets = _pick_bank_instant_value(prev_facts, BANK_TOTAL_ASSETS_TAGS, prev_end_date)
+                prev_equity = _extract_bank_equity(prev_facts, prev_end_date)
+
+                if prev_assets is not None and prev_equity is not None:
+                    return prev_assets, prev_equity
+
+    return assets, equity
+
+
 def _extract_bank_roa(
     facts: dict,
     plan: dict | None,
@@ -238,23 +314,10 @@ def _extract_bank_roa(
     if _is_plausible_reported_roa(normalized_reported):
         return normalized_reported
 
-    # Compute ROA from Net Income and Total Assets
-    total_asset_entries = select_entries(
-        facts,
-        BANK_TOTAL_ASSETS_TAGS,
-        namespace_mode=_NAMESPACE_MODE,
-        instant_date=target_end_date,
-        no_dimensions=True,
+    # Compute ROA from Net Income and Total Assets with prior fallback
+    total_assets, _equity = _extract_bank_balance_sheet_with_fallback(
+        facts, file_path, target_end_date
     )
-    if not total_asset_entries:
-        total_asset_entries = select_entries(
-            facts,
-            BANK_TOTAL_ASSETS_TAGS,
-            namespace_mode=_NAMESPACE_MODE,
-            end_date=target_end_date,
-            no_dimensions=True,
-        )
-    total_assets, _asset_entry = pick_numeric(total_asset_entries)
 
     if net_income is not None and total_assets not in (None, 0):
         annualization = _computed_roa_annualization(plan)
@@ -730,6 +793,24 @@ def build_bank_metrics(
         file_path,
     )
 
+    # ── ROE & Cost-to-Income ────────────────────────────────────────
+    roe = None
+    _assets, equity = _extract_bank_balance_sheet_with_fallback(
+        facts, file_path, target_end_date
+    )
+    if net_income is not None and equity is not None and equity > 0:
+        annualization = _computed_roa_annualization(plan)
+        roe = (net_income / equity) * annualization * 100
+
+    cost_to_income = None
+    operating_expenses = pick_value_for_plan(
+        facts, BANK_OPERATING_EXPENSES_TAGS, plan, _NAMESPACE_MODE
+    )
+    if operating_expenses is not None and nii is not None and other_income is not None:
+        net_operating_income = nii + other_income
+        if net_operating_income > 0:
+            cost_to_income = (operating_expenses / net_operating_income) * 100
+
     # ── NPA ─────────────────────────────────────────────────────────
     gnpa_pct, nnpa_pct = _extract_bank_npa(
         facts,
@@ -752,6 +833,8 @@ def build_bank_metrics(
         warnings.append("PBT not found")
     if net_income is None:
         warnings.append("Net Income not found")
+    if _assets is None:
+        warnings.append("Balance Sheet assets/equity not found (metrics like ROE will be missing)")
 
     return FinancialMetrics(
         company_type="bank",
@@ -763,6 +846,9 @@ def build_bank_metrics(
         basic_eps=basic_eps,
         diluted_eps=diluted_eps,
         roa=roa,
+        roe=roe,
+        equity=equity,
+        cost_to_income=cost_to_income,
         gnpa_pct=gnpa_pct,
         nnpa_pct=nnpa_pct,
         warnings=warnings,

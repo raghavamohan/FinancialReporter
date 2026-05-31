@@ -51,19 +51,28 @@ class FinancialMetrics:
     pe_ratio: float | None = None  # share_price / trailing_eps
     quarter_dividend: float | None = None  # Sum of per-share dividends (NSE corporate actions)
     other_corporate_actions: str | None = None  # Non-dividend actions in reporting window
+    roe: float | None = None  # Return on Equity (annualized %)
+    roa: float | None = None  # Return on Assets (annualized %)
+    equity: float | None = None  # Total Equity
+    pb_ratio: float | None = None  # Price-to-Book Ratio
 
     # ── Manufacturing-specific (Ind-AS) ─────────────────────────────
     revenue: float | None = None  # Revenue from Operations
     ebitda: float | None = None  # PBT + Finance Cost + D&A
     pbit: float | None = None  # PBT + Finance Cost (= EBIT)
+    gross_profit: float | None = None  # Gross Profit
+    gross_margin: float | None = None  # Gross Margin %
+    ebitda_margin: float | None = None  # EBITDA Margin %
+    net_margin: float | None = None  # Net Profit Margin %
+    roce: float | None = None  # Return on Capital Employed (annualized %)
 
     # ── Banking-specific (IN-GAAP) ──────────────────────────────────
     nii: float | None = None  # Net Interest Income
     total_income: float | None = None  # Interest Earned + Other Income
     ppop: float | None = None  # Pre-Provision Operating Profit
-    roa: float | None = None  # Return on Assets (annualized %)
     gnpa_pct: float | None = None  # Gross NPA %
     nnpa_pct: float | None = None  # Net NPA %
+    cost_to_income: float | None = None  # Cost-to-Income Ratio %
 
     # ── Debug / provenance ──────────────────────────────────────────
     warnings: list[str] = field(default_factory=list)

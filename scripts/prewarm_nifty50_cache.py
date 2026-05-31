@@ -17,6 +17,7 @@ import argparse
 import csv
 import datetime as dt
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -26,8 +27,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from fin_reporter.downloader import NSEXBRLDownloader
 from fin_reporter.market_data import (
+    _load_cached_share_prices,
     corporate_actions_cache_exists,
     fetch_corporate_actions_rows,
+    fetch_share_price_on_date,
+    fetch_share_restructuring_events,
     summarize_corporate_actions,
 )
 from fin_reporter.models import DownloadResult
@@ -134,8 +138,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quarters",
         type=int,
-        default=13,
-        help="Number of trailing quarters to prewarm (default: 13).",
+        default=20,
+        help="Number of trailing quarters to prewarm (default: 20).",
     )
     parser.add_argument(
         "--output",
@@ -177,6 +181,19 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Re-fetch corporate actions from NSE even when a local cache "
             "file already exists."
+        ),
+    )
+    parser.add_argument(
+        "--skip-prices",
+        action="store_true",
+        help="Skip historical share-prices cache warmup.",
+    )
+    parser.add_argument(
+        "--refresh-prices",
+        action="store_true",
+        help=(
+            "Re-fetch share prices from NSE even when a local cache "
+            "value already exists for the date."
         ),
     )
     return parser.parse_args()
@@ -359,6 +376,159 @@ def warm_corporate_actions_cache(
     return report_rows
 
 
+def _is_price_cached(
+    cache_dir: str,
+    symbol: str,
+    quarters: list[str],
+    downloader: NSEXBRLDownloader,
+) -> bool:
+    """Return True if all quarters have cached prices for this symbol."""
+    cached = _load_cached_share_prices(cache_dir, symbol)
+    if not cached:
+        return False
+    for quarter in quarters:
+        try:
+            period_str = downloader.resolve_target_period(quarter)
+            as_of_date = dt.datetime.strptime(period_str, "%d-%b-%Y").date()
+            date_str = as_of_date.isoformat()
+            if date_str not in cached:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def warm_share_prices_cache(
+    downloader: NSEXBRLDownloader,
+    symbols: list[str],
+    quarters: list[str],
+    output_dir: str,
+    *,
+    delay_seconds: float = 2.0,
+    refresh: bool = False,
+) -> list[dict[str, str | int]]:
+    """Populate local share price cache for all symbols and quarters."""
+    report_rows: list[dict[str, str | int]] = []
+
+    for idx, raw_symbol in enumerate(symbols, start=1):
+        symbol = downloader.normalize_symbol(raw_symbol)
+        
+        # Load corporate action restructuring events to assist with price adjustment (e.g. split/bonus)
+        restructuring_events = fetch_share_restructuring_events(
+            downloader,
+            symbol,
+            cache_dir=output_dir,
+        )
+        
+        cached_count = 0
+        downloaded_count = 0
+        failed_count = 0
+        
+        for quarter in quarters:
+            try:
+                period_str = downloader.resolve_target_period(quarter)
+                as_of_date = dt.datetime.strptime(period_str, "%d-%b-%Y").date()
+            except Exception as e:
+                print(f"[!] [{symbol}] Error resolving period for {quarter}: {e}")
+                failed_count += 1
+                continue
+                
+            date_str = as_of_date.isoformat()
+            cached_prices = _load_cached_share_prices(output_dir, symbol)
+            is_cached = (
+                cached_prices is not None
+                and date_str in cached_prices
+                and not refresh
+            )
+            
+            if is_cached:
+                cached_count += 1
+            else:
+                try:
+                    price = fetch_share_price_on_date(
+                        downloader,
+                        symbol,
+                        as_of_date,
+                        restructuring_events=restructuring_events,
+                        cache_dir=output_dir,
+                    )
+                    if price is not None:
+                        downloaded_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    print(
+                        f"[!] [{symbol}] Error fetching price for {quarter} ({date_str}): {e}"
+                    )
+                    failed_count += 1
+                
+                # Only sleep if we actually fetched from network (or tried to)
+                if delay_seconds > 0:
+                    time.sleep(delay_seconds)
+                    
+        total = cached_count + downloaded_count + failed_count
+        status = "COMPLETE" if failed_count == 0 else "PARTIAL_FAILED"
+        if total == 0:
+            status = "FAILED"
+            
+        report_rows.append(
+            {
+                "symbol": symbol,
+                "status": status,
+                "total_periods": total,
+                "cached_periods": cached_count,
+                "downloaded_periods": downloaded_count,
+                "failed_periods": failed_count,
+                "cache_path": str(
+                    Path(output_dir) / ".market_cache" / f"{symbol}_share_prices.json"
+                ),
+            }
+        )
+        print(
+            f"[*] [{idx}/{len(symbols)}] {symbol} share prices: {status} "
+            f"(total={total}, cached={cached_count}, downloaded={downloaded_count}, "
+            f"failed={failed_count})"
+        )
+        
+    return report_rows
+
+
+def write_share_prices_report(
+    rows: list[dict[str, str | int]],
+    output_dir: str,
+) -> Path:
+    """Write share prices cache summary CSV."""
+    report_dir = Path(output_dir) / ".reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = report_dir / f"prewarm_share_prices_{stamp}.csv"
+    headers = (
+        "symbol",
+        "status",
+        "total_periods",
+        "cached_periods",
+        "downloaded_periods",
+        "failed_periods",
+        "cache_path",
+    )
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow(
+                [
+                    row["symbol"],
+                    row["status"],
+                    row["total_periods"],
+                    row["cached_periods"],
+                    row["downloaded_periods"],
+                    row["failed_periods"],
+                    row["cache_path"],
+                ]
+            )
+    return report_path
+
+
 def build_cached_results_for_quarter(
     downloader: NSEXBRLDownloader,
     symbols: list[str],
@@ -522,6 +692,36 @@ def main() -> None:
     else:
         print("\n=== Corporate-actions cache warmup skipped ===")
 
+    share_prices_report: Path | None = None
+    if not args.skip_prices:
+        print("\n=== Share-prices cache warmup ===")
+        prices_needs_nse = args.refresh_prices or any(
+            not _is_price_cached(
+                args.output,
+                downloader.normalize_symbol(raw_symbol),
+                download_quarters,
+                downloader,
+            )
+            for raw_symbol in symbols
+        )
+        if prices_needs_nse and not nse_session_initialized:
+            downloader.initialize_session()
+            nse_session_initialized = True
+        price_report_rows = warm_share_prices_cache(
+            downloader,
+            symbols,
+            download_quarters,
+            args.output,
+            delay_seconds=args.delay,
+            refresh=args.refresh_prices,
+        )
+        share_prices_report = write_share_prices_report(
+            price_report_rows,
+            args.output,
+        )
+    else:
+        print("\n=== Share-prices cache warmup skipped ===")
+
     print("\n=== Prewarm complete ===")
     print(
         "[+] Download status totals: "
@@ -533,6 +733,8 @@ def main() -> None:
     print(f"[+] Failures report CSV: {failed_report}")
     if corporate_actions_report is not None:
         print(f"[+] Corporate-actions report CSV: {corporate_actions_report}")
+    if share_prices_report is not None:
+        print(f"[+] Share-prices report CSV: {share_prices_report}")
 
 
 if __name__ == "__main__":

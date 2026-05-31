@@ -45,6 +45,7 @@ def build_metrics_from_file(
         metrics = build_manufacturing_metrics(
             facts,
             target_period,
+            file_path=file_path,
             ebitda_definition=ebitda_definition,
         )
 

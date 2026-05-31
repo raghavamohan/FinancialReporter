@@ -75,23 +75,22 @@ MANUFACTURING_PBIT_TAGS = (
 )
 
 # NET INCOME (Profit attributable to owners of parent)
-#   Prefer continuing-operations profit first so discontinued-ops gains
-#   (e.g. demergers) do not inflate quarterly net income.
-#   Owner-attributable tags follow for consolidated minority handling.
+#   Prefer owner-attributable tags for consolidated minority handling first.
+#   Total profit follows, with continuing-operations as final fallback.
 MANUFACTURING_NET_INCOME_TAGS = (
-    "ProfitLossForPeriodFromContinuingOperations",
     "ProfitLossAttributableToOwnersOfParent",
     "ProfitOrLossAttributableToOwnersOfParent",
     "ProfitLossForPeriod",
+    "ProfitLossForPeriodFromContinuingOperations",
 )
 
 # BASIC EPS
 #   Source: P&L → Earnings per equity share → Basic
-#   Reports earnings per share before dilution effects
+#   Prefer total earnings per share before dilution first, then continuing.
 MANUFACTURING_BASIC_EPS_TAGS = (
-    "BasicEarningsLossPerShareFromContinuingOperations",
     "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations",
     "BasicEarningsLossPerShare",
+    "BasicEarningsLossPerShareFromContinuingOperations",
     "BasicEarningsPerShareFromContinuingOperations",
 )
 
@@ -99,9 +98,35 @@ MANUFACTURING_BASIC_EPS_TAGS = (
 #   Source: P&L → Earnings per equity share → Diluted
 #   Includes dilutive potential equity shares (stock options, convertibles)
 MANUFACTURING_DILUTED_EPS_TAGS = (
-    "DilutedEarningsLossPerShareFromContinuingOperations",
     "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations",
     "DilutedEarningsLossPerShare",
+    "DilutedEarningsLossPerShareFromContinuingOperations",
+)
+
+# COST OF GOODS SOLD / GROSS PROFIT COMPONENTS
+MANUFACTURING_COST_OF_MATERIALS_TAGS = (
+    "CostOfMaterialsConsumed",
+)
+MANUFACTURING_PURCHASES_STOCK_TAGS = (
+    "PurchasesOfStockInTrade",
+)
+MANUFACTURING_CHANGES_INVENTORIES_TAGS = (
+    "ChangesInInventoriesOfFinishedGoodsWorkInProgressAndStockInTrade",
+    "ChangesInInventoriesOfFinishedGoodsWorkInProcessAndStockInTrade",
+)
+
+# BALANCE SHEET (Manufacturing)
+MANUFACTURING_EQUITY_TAGS = (
+    "Equity",
+    "EquityAttributableToOwnersOfParent",
+    "EquityShareCapital",
+)
+MANUFACTURING_CURRENT_LIABILITIES_TAGS = (
+    "CurrentLiabilities",
+)
+MANUFACTURING_TOTAL_ASSETS_TAGS = (
+    "Assets",
+    "TotalAssets",
 )
 
 
@@ -208,6 +233,19 @@ BANK_GNPA_TAGS = (
 #   Source: Asset quality disclosures
 BANK_NNPA_TAGS = (
     "PercentageOfNpa",
+)
+
+# BANK BALANCE SHEET & EFFICIENCY TAGS
+BANK_EQUITY_SHARE_CAPITAL_TAGS = (
+    "Capital",
+    "EquityShareCapital",
+    "ShareCapital",
+)
+BANK_RESERVES_AND_SURPLUS_TAGS = (
+    "ReservesAndSurplus",
+)
+BANK_OPERATING_EXPENSES_TAGS = (
+    "OperatingExpenses",
 )
 
 
