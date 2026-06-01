@@ -8,20 +8,20 @@ Symbols are NSE tickers (for example `RELIANCE`, `HDFCBANK`, `ITC`). The tool fe
 
 ### CLI
 
-- Downloads XBRL from NSE **integrated** and **legacy** financial-results APIs, with automatic fallback
+- Downloads XBRL from NSE integrated and financial-results APIs, with automatic fallback
 - Reuses cached files when present; skips NSE session warmup when nothing new is required
 - Fetches a **standalone** companion filing when consolidated is cached but standalone is needed (for example NPA / ROA)
 - Resolves Indian fiscal quarters (`Q1_FY26` … `Q4_FY26`, two- or four-digit FY) or explicit period-end dates (`31-Mar-2026`)
 - Multiple symbols and multiple quarters per run (`--back-quarters`)
 - **Q4 handling:** derives quarter figures from cumulative contexts when direct quarter tags are missing; banks can use FY − prior YTD when earlier-quarter files exist in the same output folder
-- Configurable manufacturing **EBITDA** formula and optional XBRL tag discovery for debugging
+- Manufacturing **EBITDA** with `include-other-income` or `exclude-other-income`, plus optional XBRL tag discovery (`--debug-tags`)
 
 ### Web dashboard
 
 - Browser UI served by [`app.py`](app.py) with a REST API for symbols, quarters, and metrics
 - Multi-company comparison with **Performance Trends** chart (Chart.js time series)
-- **Chart metric checkboxes** — one checkbox per metric toggles that series on/off for all companies on the chart (replaces Chart.js legend click/strikethrough)
-- **Metrics picker** in the sidebar — filter which parameters appear in tables and charts; leave empty to show all applicable metrics
+- **Chart metric checkboxes** — one checkbox per metric toggles that series on/off for all companies on the chart
+- **Metrics picker** in the sidebar — filter which parameters appear in tables and charts; leave empty to show all sector-applicable metrics
 - **Company tabs** — per-symbol metrics table and corporate-actions timeline
 - **EBITDA calculation** checkbox (manufacturing only): exclude other income from the EBITDA formula when checked
 - CSV export of computed metrics
@@ -46,6 +46,24 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+Optional — run tests:
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+## Architecture
+
+Both the CLI and web dashboard call [`fin_reporter.service.run_analysis`](fin_reporter/service.py), which:
+
+1. Resolves display and download quarter ranges (including extra quarters for trailing EPS / P/E)
+2. Downloads or reuses cached XBRL via [`NSEXBRLDownloader`](fin_reporter/downloader.py)
+3. Parses each filing once ([`parse_xbrl`](fin_reporter/xbrl_parser.py)) and builds sector metrics
+4. Enriches with market data (share price, trailing EPS, P/E, dividends, corporate actions)
+
+The downloader composes [`nse_session`](fin_reporter/nse_session.py) (HTTP session), [`filing_resolver`](fin_reporter/filing_resolver.py) (NSE filing lookup), and [`cache_paths`](fin_reporter/cache_paths.py) (local cache filenames). Trailing EPS uses lightweight EPS extraction ([`fin_reporter.eps`](fin_reporter/eps.py)) rather than rebuilding full metrics for each prior quarter.
+
 ## Web dashboard
 
 Start the local server (default port **8080**, cache under `.\xbrl_downloads`):
@@ -56,6 +74,8 @@ python app.py --port 8080 --cache-dir .\xbrl_downloads
 ```
 
 Open [http://localhost:8080/](http://localhost:8080/) in your browser.
+
+The server reuses one `NSEXBRLDownloader` instance per process and only opens an NSE session when cached files or market data require network access.
 
 ### Control panel
 
@@ -70,7 +90,7 @@ Open [http://localhost:8080/](http://localhost:8080/) in your browser.
 
 ### Results area
 
-1. **Performance Trends** — multi-company chart over trailing quarters. Above the chart, **checkboxes** (one per metric) control which metrics are drawn. Unchecking hides that metric for every company on the chart; labels dim when unchecked (no strikethrough).
+1. **Performance Trends** — multi-company chart over trailing quarters. Checkboxes above the chart control which metrics are drawn for every company; unchecked labels dim.
 2. **Company tabs** — metrics table (quarters as columns) and corporate-actions timeline per symbol.
 3. **Export metrics to CSV** — full metric dump for the current run.
 
@@ -78,7 +98,7 @@ Mixed bank + manufacturing runs show sector-appropriate rows (for example Revenu
 
 ### REST API
 
-All endpoints are `GET` with JSON responses.
+All endpoints are `GET` with compact JSON responses.
 
 | Endpoint | Parameters | Description |
 |----------|------------|-------------|
@@ -86,13 +106,23 @@ All endpoints are `GET` with JSON responses.
 | `/api/quarters` | — | Supported quarter codes (`Q4_FY23` … `Q4_FY26`) |
 | `/api/metrics` | `symbols` (comma-separated), `quarter`, `back_quarters`, `ebitda_definition` | Download/cache filings, compute metrics, return JSON |
 
+`/api/metrics` response fields:
+
+| Field | Description |
+|-------|-------------|
+| `display_quarters` | Quarter codes shown in the UI |
+| `symbols` | Requested symbols |
+| `metrics` | Nested map: symbol → quarter → metric object |
+| `downloads` | Per symbol/quarter download status |
+| `errors` | Non-fatal failures during download or metric computation |
+
 Example:
 
 ```powershell
 curl "http://localhost:8080/api/metrics?symbols=HDFCBANK,RELIANCE&quarter=Q4_FY26&back_quarters=8&ebitda_definition=include-other-income"
 ```
 
-`ebitda_definition` accepts `include-other-income` (default) or `exclude-other-income`. Legacy values `tickertape` and `subtract-other-income` are still accepted and mapped automatically.
+`ebitda_definition` accepts `include-other-income` (default) or `exclude-other-income`.
 
 ## CLI usage
 
@@ -118,7 +148,7 @@ Symbols are uppercased automatically. The alias `HDFC` is normalized to `HDFCBAN
 | `--output` | No | `.\xbrl_downloads` | Directory for cached XBRL files |
 | `--timeout` | No | `20` | HTTP timeout per request (seconds) |
 | `--delay` | No | `2.0` | Pause between symbol requests (seconds) |
-| `--ebitda-definition` | No | `include-other-income` | Manufacturing EBITDA only (see below) |
+| `--ebitda-definition` | No | `include-other-income` | Manufacturing EBITDA only: `include-other-income` or `exclude-other-income` |
 | `--debug-tags` | No | off | Print candidate XBRL tags for EBITDA-related fields (manufacturing) |
 
 #### `--ebitda-definition` (manufacturing only)
@@ -128,14 +158,7 @@ Symbols are uppercased automatically. The alias `HDFC` is normalized to `HDFCBAN
 | `include-other-income` | Prefer segment PBT + segment finance cost + depreciation; otherwise PBT (pre-exceptional where available) + finance cost + depreciation |
 | `exclude-other-income` | Same base components, then subtract **Other Income** |
 
-**Legacy aliases** (still accepted in CLI, API, and programmatic calls):
-
-| Legacy value | Maps to |
-|--------------|---------|
-| `tickertape` | `include-other-income` |
-| `subtract-other-income` | `exclude-other-income` |
-
-Banks do not use EBITDA. For banks, **PPOP** (Pre-Provision Operating Profit) is the operating-profit metric shown instead — it is the banking analogue of manufacturing EBITDA because interest is core business income, not a financing cost to add back.
+Banks do not use EBITDA. For banks, **PPOP** (Pre-Provision Operating Profit) is the operating-profit metric shown instead — interest is core business income, not a financing cost to add back.
 
 ### Quarter codes
 
@@ -218,7 +241,7 @@ Per symbol and quarter: period, filing basis (`consolidated` / `standalone` / `u
 | `FAILED` | Filing found but download failed |
 | `ERROR` | Unexpected error during processing |
 
-Source is typically `integrated`, `legacy`, or `cached`.
+Source is typically `integrated`, `legacy`, or `cached` (NSE API endpoint used for the download).
 
 ### 2. Financial metrics tables
 
@@ -236,11 +259,11 @@ Row sets depend on company type detected in each filing:
 |-----------|--------|
 | Net Interest Income | Interest earned − interest expended |
 | Total Income | Interest earned + other income |
-| PPOP | Pre-provision operating profit; banking equivalent of manufacturing EBITDA |
+| PPOP | Pre-provision operating profit |
 | PBT | Profit before tax (after provisions) |
 | Net Income | |
 | Basic EPS | Not scaled to crore |
-| P/E Ratio | Share price on period end ÷ trailing four-quarter basic EPS, with older EPS adjusted for bonus/split ex-dates after each quarter (needs prior-quarter XBRL in `--output`) |
+| P/E Ratio | Share price on period end ÷ trailing four-quarter basic EPS, with older EPS adjusted for bonus/split ex-dates (needs prior-quarter XBRL in `--output`) |
 | Dividend (Rs/sh) | Sum of per-share dividends from NSE corporate actions with ex-date in the reporting quarter |
 | Other Corporate Actions | Non-dividend corporate actions (bonus, split, demerger, rights, etc.) with ex-date in the reporting quarter |
 | ROA (%) | Annualized when reported as a decimal on a quarter context |
@@ -277,14 +300,22 @@ FinancialReporter/
 ├── fin_report.py              # CLI wrapper → fin_reporter.cli
 ├── fin_reporter/
 │   ├── __main__.py            # python -m fin_reporter
-│   ├── cli.py                 # Arguments and orchestration
+│   ├── cli.py                 # CLI arguments; delegates to service.run_analysis
+│   ├── service.py             # Shared download + metrics pipeline
 │   ├── constants.py           # XBRL tag mappings
 │   ├── models.py              # DownloadResult, FinancialMetrics, …
-│   ├── downloader.py          # NSE session and downloads
-│   ├── market_data.py         # Share prices, dividends, trailing EPS
-│   ├── xbrl_parser.py         # XBRL parsing and metadata
-│   ├── period_resolver.py     # Quarter contexts and Q4 deltas
+│   ├── downloader.py          # NSEXBRLDownloader orchestrator
+│   ├── nse_session.py         # NSE cookie session and api_get
+│   ├── filing_resolver.py     # Integrated / financial-results filing lookup
+│   ├── cache_paths.py         # Local XBRL cache path helpers
+│   ├── market_data.py         # Share prices, dividends, enrichment
+│   ├── eps.py                 # Lightweight basic-EPS extraction
+│   ├── xbrl_parser.py         # XBRL parse cache, facts, metadata
+│   ├── period_resolver.py     # Quarter arithmetic and context plans
 │   ├── display.py             # Console tables
+│   ├── symbols.py             # Nifty 50 fallback symbol list
+│   ├── bse_fallback.py        # BSE PDF note when NSE XBRL is missing
+│   ├── timing.py              # Optional performance logging
 │   └── metrics/
 │       ├── base.py            # Bank vs manufacturing detection
 │       ├── banking.py         # IN-GAAP metrics (NII, PPOP, NPA, …)
@@ -292,17 +323,19 @@ FinancialReporter/
 ├── frontend/
 │   ├── index.html             # Dashboard SPA shell
 │   ├── app.js                 # Metrics registry, chart, tables, API client
-│   └── style.css              # Glassmorphic UI styles
+│   └── style.css              # Dashboard UI styles
 ├── scripts/
 │   └── prewarm_nifty50_cache.py
+├── tests/                     # pytest suite (see requirements-dev.txt)
 ├── requirements.txt
+├── requirements-dev.txt
 ├── LICENSE                    # Apache License 2.0
 └── xbrl_downloads/            # Default cache (gitignored; created at runtime)
 ```
 
 ## Programmatic use
 
-The package can be imported for parsing and metrics without running the CLI. `NSEXBRLDownloader` requires `requests`.
+### Metrics from a cached XBRL file
 
 ```python
 from fin_reporter.metrics import build_metrics_from_file
@@ -315,7 +348,26 @@ metrics = build_metrics_from_file(
 print(metrics.company_type, metrics.revenue, metrics.ebitda)
 ```
 
-Legacy `ebitda_definition="tickertape"` is normalized to `include-other-income` automatically.
+### Full analysis (download + metrics + market enrichment)
+
+```python
+from fin_reporter.downloader import NSEXBRLDownloader
+from fin_reporter.service import run_analysis
+
+downloader = NSEXBRLDownloader(timeout=20, delay_seconds=2.0)
+result = run_analysis(
+    ["RELIANCE", "HDFCBANK"],
+    quarter="Q4_FY26",
+    back_quarters=4,
+    cache_dir="xbrl_downloads",
+    ebitda_definition="include-other-income",
+    downloader=downloader,
+)
+
+for symbol, quarters in result.metrics_by_symbol.items():
+    for quarter_label, metrics in quarters.items():
+        print(symbol, quarter_label, metrics.net_income, metrics.pe_ratio)
+```
 
 ## Notes and limitations
 
