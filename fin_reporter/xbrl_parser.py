@@ -14,8 +14,10 @@ Key concepts:
 """
 
 import datetime as dt
+import os
 import zipfile
 from collections import Counter
+from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
 from fin_reporter.constants import (
@@ -26,6 +28,30 @@ from fin_reporter.constants import (
     FILING_NATURE_TAG,
 )
 from fin_reporter.models import FilingMetadata
+
+
+@dataclass
+class ParsedXbrl:
+    """Single-parse XBRL payload cached by file path and modification time."""
+
+    facts: dict
+    contexts: dict
+    metadata: FilingMetadata
+
+
+_PARSE_CACHE: dict[tuple[str, float], ParsedXbrl] = {}
+
+
+def clear_parse_cache() -> None:
+    """Clear the in-memory XBRL parse cache (useful in tests)."""
+    _PARSE_CACHE.clear()
+
+
+def _file_cache_key(file_path: str) -> tuple[str, float] | None:
+    try:
+        return (file_path, os.path.getmtime(file_path))
+    except OSError:
+        return None
 
 
 # ─── Low-level XML helpers ───────────────────────────────────────────────────
@@ -264,26 +290,8 @@ def _synthesize_missing_contexts(
 # ─── Fact extraction ─────────────────────────────────────────────────────────
 
 
-def extract_facts(file_path: str) -> tuple[dict, dict]:
-    """Extract all numeric facts from an XBRL file.
-
-    Prefers consolidated contexts when explicit consolidated dimensional
-    members are present. Falls back to non-dimensional (base) contexts
-    for filings that are already consolidated and don't use dimensions.
-
-    Returns:
-        (facts, contexts) where:
-        - facts: dict mapping tag_name → list of fact entries
-        - contexts: dict mapping context_id → context metadata
-    """
-    content = read_xbrl_text(file_path)
-    if not content:
-        return {}, {}
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError:
-        return {}, {}
-
+def _extract_facts_from_root(root: ET.Element) -> tuple[dict, dict]:
+    """Extract numeric facts and context metadata from a parsed XML root."""
     contexts = extract_context_metadata(root)
     contexts.update(_synthesize_missing_contexts(root, contexts))
     has_explicit_consolidated = any(
@@ -292,7 +300,6 @@ def extract_facts(file_path: str) -> tuple[dict, dict]:
 
     facts: dict[str, list[dict]] = {}
     for elem in root.iter():
-        # Skip container elements (only process leaf nodes with text)
         if len(elem):
             continue
         text = (elem.text or "").strip()
@@ -305,13 +312,10 @@ def extract_facts(file_path: str) -> tuple[dict, dict]:
         if not context_meta:
             continue
 
-        # Context filtering: prefer consolidated data
         if has_explicit_consolidated:
             if not context_meta["is_consolidated"]:
                 continue
         else:
-            # Fallback: filings that are already consolidated often keep
-            # primary facts in base (non-dimensional) contexts like OneD/FourD.
             if context_meta["has_dimensions"]:
                 continue
 
@@ -336,23 +340,8 @@ def extract_facts(file_path: str) -> tuple[dict, dict]:
     return facts, contexts
 
 
-# ─── Filing metadata extraction ──────────────────────────────────────────────
-
-
-def extract_filing_metadata(file_path: str) -> FilingMetadata:
-    """Read filing metadata (nature, company name) from XBRL content.
-
-    This reads the ``NatureOfReportStandaloneConsolidated`` and company
-    name tags without performing full fact extraction.
-    """
-    content = read_xbrl_text(file_path)
-    if not content:
-        return FilingMetadata()
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError:
-        return FilingMetadata()
-
+def _extract_metadata_from_root(root: ET.Element) -> FilingMetadata:
+    """Read filing metadata from an already-parsed XML root."""
     nature = "Unknown"
     company_name = "Unknown"
     reporting_period = "Unknown"
@@ -374,6 +363,57 @@ def extract_filing_metadata(file_path: str) -> FilingMetadata:
         reporting_period=reporting_period,
         company_name=company_name,
     )
+
+
+def parse_xbrl(file_path: str) -> ParsedXbrl:
+    """Parse an XBRL file once and cache by path + modification time."""
+    cache_key = _file_cache_key(file_path)
+    if cache_key is not None and cache_key in _PARSE_CACHE:
+        return _PARSE_CACHE[cache_key]
+
+    empty = ParsedXbrl(facts={}, contexts={}, metadata=FilingMetadata())
+    content = read_xbrl_text(file_path)
+    if not content:
+        if cache_key is not None:
+            _PARSE_CACHE[cache_key] = empty
+        return empty
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        if cache_key is not None:
+            _PARSE_CACHE[cache_key] = empty
+        return empty
+
+    facts, contexts = _extract_facts_from_root(root)
+    metadata = _extract_metadata_from_root(root)
+    parsed = ParsedXbrl(facts=facts, contexts=contexts, metadata=metadata)
+    if cache_key is not None:
+        _PARSE_CACHE[cache_key] = parsed
+    return parsed
+
+
+def extract_facts(file_path: str) -> tuple[dict, dict]:
+    """Extract all numeric facts from an XBRL file.
+
+    Prefers consolidated contexts when explicit consolidated dimensional
+    members are present. Falls back to non-dimensional (base) contexts
+    for filings that are already consolidated and don't use dimensions.
+
+    Returns:
+        (facts, contexts) where:
+        - facts: dict mapping tag_name → list of fact entries
+        - contexts: dict mapping context_id → context metadata
+    """
+    parsed = parse_xbrl(file_path)
+    return parsed.facts, parsed.contexts
+
+
+# ─── Filing metadata extraction ──────────────────────────────────────────────
+
+
+def extract_filing_metadata(file_path: str) -> FilingMetadata:
+    """Read filing metadata (nature, company name) from XBRL content."""
+    return parse_xbrl(file_path).metadata
 
 
 # ─── Fact selection and picking ──────────────────────────────────────────────

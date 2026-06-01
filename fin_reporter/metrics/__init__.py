@@ -4,7 +4,7 @@ from fin_reporter.metrics.base import detect_company_type
 from fin_reporter.metrics.banking import build_bank_metrics
 from fin_reporter.metrics.manufacturing import build_manufacturing_metrics, normalize_ebitda_definition
 from fin_reporter.models import FinancialMetrics
-from fin_reporter.xbrl_parser import extract_facts, extract_filing_metadata
+from fin_reporter.xbrl_parser import extract_facts, parse_xbrl
 
 __all__ = [
     "build_metrics_from_file",
@@ -38,7 +38,8 @@ def build_metrics_from_file(
     if key in _METRICS_CACHE:
         return _METRICS_CACHE[key]
 
-    facts, _contexts = extract_facts(file_path)
+    parsed = parse_xbrl(file_path)
+    facts = parsed.facts
     if not facts:
         metrics = FinancialMetrics(
             warnings=["No parseable XBRL facts found in file"],
@@ -46,7 +47,7 @@ def build_metrics_from_file(
         _METRICS_CACHE[key] = metrics
         return metrics
 
-    filing_meta = extract_filing_metadata(file_path)
+    filing_meta = parsed.metadata
     company_type = detect_company_type(facts)
 
     if company_type == "bank":

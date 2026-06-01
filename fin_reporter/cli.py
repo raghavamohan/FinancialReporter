@@ -3,16 +3,13 @@
 Usage::
 
     python -m fin_reporter --symbols RELIANCE HDFCBANK --quarter Q4_FY26
-
-Or via the legacy entry point::
-
-    python fin_report_cli.py --symbols RELIANCE HDFCBANK --quarter Q4_FY26
 """
 
 import argparse
 
 from fin_reporter.display import print_metric_table, print_results_table
 from fin_reporter.downloader import NSEXBRLDownloader
+from fin_reporter.service import run_analysis
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,37 +110,33 @@ def main() -> None:
             "[*] Also fetching prior-quarter XBRL for trailing EPS / P/E: "
             + ", ".join(support_quarters)
         )
-    if downloader.all_requested_files_cached(
+
+    analysis = run_analysis(
         symbols,
-        download_quarters,
+        args.quarter,
+        args.back_quarters,
         args.output,
-    ):
-        print("[+] All requested XBRL files found locally; skipping NSE session.")
-    else:
-        downloader.initialize_session()
-    results = []
+        ebitda_definition=args.ebitda_definition,
+        downloader=downloader,
+    )
+
     display_set = {token.strip().upper() for token in display_quarters}
-    for quarter in download_quarters:
-        quarter_results = downloader.download_for_symbols(
-            symbols,
-            quarter,
-            args.output,
-        )
-        for result in quarter_results:
-            quarter_label = (result.quarter_label or quarter).strip().upper()
-            if quarter_label not in display_set and result.status == "DOWNLOADED":
-                result.message = (
-                    f"{result.message} (trailing EPS support, not in metrics table)"
-                )
-        results.extend(quarter_results)
-    print_results_table(results, args.quarter)
+    for result in analysis.download_results:
+        quarter_label = (result.quarter_label or args.quarter).strip().upper()
+        if quarter_label not in display_set and result.status == "DOWNLOADED":
+            result.message = (
+                f"{result.message} (trailing EPS support, not in metrics table)"
+            )
+
+    print_results_table(analysis.download_results, args.quarter)
     print_metric_table(
-        results,
+        analysis.download_results,
         args.quarter,
         debug_tags=args.debug_tags,
         ebitda_definition=args.ebitda_definition,
         market_downloader=downloader,
         display_quarters=display_quarters,
+        precomputed_metrics=analysis.metrics_by_symbol,
     )
 
 

@@ -15,13 +15,15 @@ from typing import TYPE_CHECKING
 
 import requests
 
-from fin_reporter.metrics import build_metrics_from_file
+from fin_reporter.eps import extract_basic_eps_from_file
 from fin_reporter.period_resolver import (
     find_symbol_quarter_file,
     previous_quarter_code,
     quarter_code_from_file_path,
+    quarter_code_to_period_end,
     quarter_start_date,
 )
+from fin_reporter.models import FinancialMetrics
 from fin_reporter.xbrl_parser import format_metric
 from fin_reporter.timing import time_block
 
@@ -43,6 +45,29 @@ _FACE_VALUE_SPLIT_RE = re.compile(
     re.IGNORECASE,
 )
 _CORPORATE_ACTIONS_CACHE_DIR = ".market_cache"
+
+
+class CorporateActionsContext:
+    """Per-request memo for NSE corporate-actions rows by symbol."""
+
+    def __init__(
+        self,
+        downloader: "NSEXBRLDownloader",
+        cache_dir: str | None,
+    ) -> None:
+        self._downloader = downloader
+        self._cache_dir = cache_dir
+        self._rows_by_symbol: dict[str, list[dict]] = {}
+
+    def rows(self, symbol: str) -> list[dict]:
+        key = symbol.upper().strip()
+        if key not in self._rows_by_symbol:
+            self._rows_by_symbol[key] = fetch_corporate_actions_rows(
+                self._downloader,
+                key,
+                cache_dir=self._cache_dir,
+            )
+        return self._rows_by_symbol[key]
 
 
 def _parse_nse_date(raw_value: str | None) -> dt.date | None:
@@ -125,7 +150,7 @@ def fetch_corporate_actions_rows(
         downloader.ensure_api_session()
         url = "https://www.nseindia.com/api/corporates-corporateActions"
         params = {"index": "equities", "symbol": symbol}
-        response = downloader._api_get(url, params=params)
+        response = downloader.api_get(url, params=params)
         if response.status_code != 200:
             return cached_rows or []
 
@@ -198,13 +223,18 @@ def fetch_share_restructuring_events(
     downloader: NSEXBRLDownloader,
     symbol: str,
     cache_dir: str | None = None,
+    *,
+    corporate_actions: CorporateActionsContext | None = None,
 ) -> list[tuple[dt.date, float]]:
     """Return (ex-date, EPS factor) for bonus and face-value split actions, oldest first."""
-    rows = fetch_corporate_actions_rows(
-        downloader,
-        symbol,
-        cache_dir=cache_dir,
-    )
+    if corporate_actions is not None:
+        rows = corporate_actions.rows(symbol)
+    else:
+        rows = fetch_corporate_actions_rows(
+            downloader,
+            symbol,
+            cache_dir=cache_dir,
+        )
     if not rows:
         return []
 
@@ -247,18 +277,17 @@ def eps_adjustment_factor_to_report_date(
 def trailing_basic_eps_sum(
     file_path: str,
     target_period: str,
-    ebitda_definition: str = "include-other-income",
+    *,
+    start_quarter_code: str | None = None,
     restructuring_events: list[tuple[dt.date, float]] | None = None,
     report_date: dt.date | None = None,
     eps_anchor_date: dt.date | None = None,
 ) -> float | None:
-    """Sum basic EPS for the report quarter and the prior three quarters.
+    """Sum basic EPS for four consecutive quarters ending at the start quarter.
 
-    When ``restructuring_events`` is supplied, older-quarter EPS is adjusted for
-    bonus/split ex-dates after that quarter ended through ``eps_anchor_date`` (or
-    ``report_date`` when no anchor is set).
+    Uses lightweight EPS extraction instead of full metric builds.
     """
-    quarter_code = quarter_code_from_file_path(file_path)
+    quarter_code = start_quarter_code or quarter_code_from_file_path(file_path)
     if not quarter_code:
         return None
 
@@ -279,17 +308,12 @@ def trailing_basic_eps_sum(
         quarter_file = find_symbol_quarter_file(file_path, current_code)
         if not quarter_file:
             break
-        period = _period_for_quarter_code(current_code)
+        period = quarter_code_to_period_end(current_code)
         if not period:
             break
-        metrics = build_metrics_from_file(
-            quarter_file,
-            period,
-            ebitda_definition=ebitda_definition,
-        )
-        if metrics.basic_eps is None:
+        quarter_eps = extract_basic_eps_from_file(quarter_file, period)
+        if quarter_eps is None:
             break
-        quarter_eps = metrics.basic_eps
         if restructuring_events and eps_as_of is not None:
             try:
                 quarter_end = dt.datetime.strptime(period, "%d-%b-%Y").date()
@@ -311,21 +335,27 @@ def trailing_basic_eps_sum(
     return total
 
 
-def _period_for_quarter_code(quarter_code: str) -> str | None:
-    match = re.fullmatch(r"Q([1-4])_FY(\d{2}|\d{4})", quarter_code)
-    if not match:
-        return None
-    quarter_num = int(match.group(1))
-    fy_token = match.group(2)
-    fy_end_year = 2000 + int(fy_token) if len(fy_token) == 2 else int(fy_token)
-    pre_year = fy_end_year - 1
-    if quarter_num == 1:
-        return dt.date(pre_year, 6, 30).strftime("%d-%b-%Y")
-    if quarter_num == 2:
-        return dt.date(pre_year, 9, 30).strftime("%d-%b-%Y")
-    if quarter_num == 3:
-        return dt.date(pre_year, 12, 31).strftime("%d-%b-%Y")
-    return dt.date(fy_end_year, 3, 31).strftime("%d-%b-%Y")
+def trailing_basic_eps_for_anchor(
+    anchor_file_path: str,
+    anchor_period: str,
+    *,
+    restructuring_events: list[tuple[dt.date, float]] | None = None,
+    eps_anchor_date: dt.date | None = None,
+) -> float | None:
+    """Compute trailing EPS once from the anchor quarter file (multi-column P/E)."""
+    anchor_code = quarter_code_from_file_path(anchor_file_path)
+    try:
+        report_date = dt.datetime.strptime(anchor_period, "%d-%b-%Y").date()
+    except ValueError:
+        report_date = None
+    return trailing_basic_eps_sum(
+        anchor_file_path,
+        anchor_period,
+        start_quarter_code=anchor_code,
+        restructuring_events=restructuring_events,
+        report_date=report_date,
+        eps_anchor_date=eps_anchor_date or report_date,
+    )
 
 
 def _parse_dividend_per_share(subject: str) -> float | None:
@@ -376,6 +406,8 @@ def fetch_other_corporate_actions_summary(
     symbol: str,
     period_end: dt.date,
     cache_dir: str | None = None,
+    *,
+    corporate_actions: CorporateActionsContext | None = None,
 ) -> str | None:
     """Summarize non-dividend corporate actions for the reporting quarter window."""
     window = _quarter_exdate_window(period_end)
@@ -383,11 +415,14 @@ def fetch_other_corporate_actions_summary(
         return None
     window_start, window_end = window
 
-    rows = fetch_corporate_actions_rows(
-        downloader,
-        symbol,
-        cache_dir=cache_dir,
-    )
+    if corporate_actions is not None:
+        rows = corporate_actions.rows(symbol)
+    else:
+        rows = fetch_corporate_actions_rows(
+            downloader,
+            symbol,
+            cache_dir=cache_dir,
+        )
     if not rows:
         return None
 
@@ -420,6 +455,8 @@ def fetch_quarter_dividend_per_share(
     symbol: str,
     period_end: dt.date,
     cache_dir: str | None = None,
+    *,
+    corporate_actions: CorporateActionsContext | None = None,
 ) -> float | None:
     """Sum per-share dividends announced for the reporting quarter (NSE ex-date window)."""
     window = _quarter_exdate_window(period_end)
@@ -427,11 +464,14 @@ def fetch_quarter_dividend_per_share(
         return None
     window_start, window_end = window
 
-    rows = fetch_corporate_actions_rows(
-        downloader,
-        symbol,
-        cache_dir=cache_dir,
-    )
+    if corporate_actions is not None:
+        rows = corporate_actions.rows(symbol)
+    else:
+        rows = fetch_corporate_actions_rows(
+            downloader,
+            symbol,
+            cache_dir=cache_dir,
+        )
     if not rows:
         return None
 
@@ -676,3 +716,102 @@ def format_pe_ratio(value: float | None) -> str:
 
 def format_dividend_per_share(value: float | None) -> str:
     return format_metric(value)
+
+
+def enrich_market_metrics(
+    metrics: FinancialMetrics,
+    file_path: str,
+    target_period: str,
+    symbol: str,
+    market_downloader,
+    *,
+    pe_anchor_date: dt.date | None = None,
+    trailing_eps: float | None = None,
+    corporate_actions: CorporateActionsContext | None = None,
+) -> FinancialMetrics:
+    """Attach trailing EPS, share price, P/E, and quarterly dividend to metrics."""
+    try:
+        period_end = dt.datetime.strptime(target_period, "%d-%b-%Y").date()
+    except ValueError:
+        period_end = None
+
+    restructuring_events = None
+    nse_symbol = None
+    cache_dir = os.path.dirname(file_path)
+    if market_downloader is not None and period_end is not None:
+        nse_symbol = market_downloader.normalize_symbol(symbol)
+        if corporate_actions is None:
+            corporate_actions = CorporateActionsContext(
+                market_downloader,
+                cache_dir,
+            )
+        restructuring_events = fetch_share_restructuring_events(
+            market_downloader,
+            nse_symbol,
+            cache_dir=cache_dir,
+            corporate_actions=corporate_actions,
+        )
+
+    eps_anchor = pe_anchor_date or period_end
+    if trailing_eps is not None:
+        metrics.trailing_eps = trailing_eps
+    else:
+        metrics.trailing_eps = trailing_basic_eps_sum(
+            file_path,
+            target_period,
+            restructuring_events=restructuring_events,
+            report_date=period_end,
+            eps_anchor_date=eps_anchor,
+        )
+
+    if market_downloader is not None and period_end is not None and nse_symbol:
+        share_price = fetch_share_price_on_date(
+            market_downloader,
+            nse_symbol,
+            period_end,
+            restructuring_events=restructuring_events,
+            cache_dir=cache_dir,
+        )
+        if (
+            share_price is not None
+            and restructuring_events
+            and eps_anchor is not None
+            and period_end < eps_anchor
+        ):
+            share_price *= corporate_action_factor_between(
+                period_end,
+                eps_anchor,
+                restructuring_events,
+            )
+        metrics.share_price = share_price
+        metrics.quarter_dividend = fetch_quarter_dividend_per_share(
+            market_downloader,
+            nse_symbol,
+            period_end,
+            cache_dir=cache_dir,
+            corporate_actions=corporate_actions,
+        )
+        metrics.other_corporate_actions = fetch_other_corporate_actions_summary(
+            market_downloader,
+            nse_symbol,
+            period_end,
+            cache_dir=cache_dir,
+            corporate_actions=corporate_actions,
+        )
+
+    metrics.pe_ratio = compute_pe_ratio(metrics.share_price, metrics.trailing_eps)
+
+    if (
+        metrics.share_price is not None
+        and metrics.equity is not None
+        and metrics.equity > 0
+        and metrics.net_income is not None
+        and metrics.basic_eps not in (None, 0)
+    ):
+        implied_shares = abs(metrics.net_income) / abs(metrics.basic_eps)
+        if implied_shares > 0:
+            bvps = metrics.equity / implied_shares
+            if bvps > 0:
+                metrics.pb_ratio = metrics.share_price / bvps
+
+    return metrics

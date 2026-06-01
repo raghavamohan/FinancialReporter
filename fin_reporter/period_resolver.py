@@ -79,7 +79,102 @@ def quarter_code_from_file_path(file_path: str) -> str | None:
 
 _QUARTER_CODE_PATTERN = re.compile(r"^Q[1-4]_FY(\d{2}|\d{4})$", re.IGNORECASE)
 _PERIOD_DATE_PATTERN = re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}$")
+_QUARTER_CODE_FULL = re.compile(r"^Q([1-4])_FY(\d{2}|\d{4})$", re.IGNORECASE)
 _TRAILING_EPS_PRIOR_QUARTERS = 3
+
+# Quarters exposed in the web dashboard (newest first).
+AVAILABLE_QUARTER_CODES: tuple[str, ...] = (
+    "Q4_FY26", "Q3_FY26", "Q2_FY26", "Q1_FY26",
+    "Q4_FY25", "Q3_FY25", "Q2_FY25", "Q1_FY25",
+    "Q4_FY24", "Q3_FY24", "Q2_FY24", "Q1_FY24",
+    "Q4_FY23", "Q3_FY23", "Q2_FY23", "Q1_FY23",
+)
+
+
+def _format_period_date(day: int, month: int, year: int) -> str:
+    return dt.date(year, month, day).strftime("%d-%b-%Y")
+
+
+def quarter_code_to_period_end(quarter_code: str) -> str | None:
+    """Convert ``Q4_FY26`` to a period-end date string like ``31-Mar-2026``."""
+    match = _QUARTER_CODE_FULL.fullmatch(quarter_code.strip().upper())
+    if not match:
+        return None
+    quarter_num = int(match.group(1))
+    fy_token = match.group(2)
+    fy_end_year = 2000 + int(fy_token) if len(fy_token) == 2 else int(fy_token)
+    pre_year = fy_end_year - 1
+    if quarter_num == 1:
+        return _format_period_date(30, 6, pre_year)
+    if quarter_num == 2:
+        return _format_period_date(30, 9, pre_year)
+    if quarter_num == 3:
+        return _format_period_date(31, 12, pre_year)
+    return _format_period_date(31, 3, fy_end_year)
+
+
+def resolve_target_period(quarter: str) -> str:
+    """Convert a quarter code or explicit period-end date to ``dd-Mon-yyyy``."""
+    quarter_token = quarter.strip().upper()
+    if _PERIOD_DATE_PATTERN.fullmatch(quarter_token):
+        parsed = dt.datetime.strptime(quarter_token, "%d-%b-%Y")
+        return parsed.strftime("%d-%b-%Y")
+
+    period = quarter_code_to_period_end(quarter_token)
+    if period is None:
+        raise ValueError(
+            "Quarter must be like Q1_FY26 or a date like 30-Jun-2025."
+        )
+    return period
+
+
+def resolve_quarter_sequence(quarter: str, back_quarters: int) -> list[str]:
+    """Build a quarter list from selected quarter backwards (newest first)."""
+    if back_quarters < 1:
+        raise ValueError("back_quarters must be at least 1.")
+
+    selected = quarter.strip().upper()
+    is_quarter_code = _QUARTER_CODE_PATTERN.fullmatch(selected) is not None
+
+    if is_quarter_code:
+        sequence: list[str] = []
+        current = selected
+        for _ in range(back_quarters):
+            sequence.append(current)
+            previous = previous_quarter_code(current)
+            if previous is None:
+                break
+            current = previous
+        return sequence
+
+    period = resolve_target_period(selected)
+    current_date = dt.datetime.strptime(period, "%d-%b-%Y").date()
+    sequence: list[str] = []
+    for _ in range(back_quarters):
+        sequence.append(current_date.strftime("%d-%b-%Y"))
+        previous_date = previous_quarter_end(current_date)
+        if previous_date is None:
+            break
+        current_date = previous_date
+    return sequence
+
+
+def resolve_display_and_download_quarters(
+    quarter: str,
+    back_quarters: int,
+) -> tuple[list[str], list[str]]:
+    """Return (display_quarters, download_quarters) including trailing-EPS support."""
+    display_quarters = resolve_quarter_sequence(quarter, back_quarters)
+    support_quarters = trailing_eps_support_quarters(display_quarters)
+    download_quarters: list[str] = []
+    seen: set[str] = set()
+    for label in display_quarters + support_quarters:
+        key = label.strip().upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        download_quarters.append(label)
+    return display_quarters, download_quarters
 
 
 def trailing_eps_support_quarters(display_quarters: list[str]) -> list[str]:

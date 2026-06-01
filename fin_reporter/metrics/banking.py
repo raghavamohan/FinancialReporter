@@ -637,7 +637,7 @@ def _apply_q4_delta_normalization(
     )
 
 
-def _should_apply_q4_delta(
+def _needs_q4_normalization(
     target_end_date: dt.date,
     plan: dict | None,
     ppop: float | None,
@@ -764,7 +764,7 @@ def build_bank_metrics(
         )
 
     # ── Q4 delta normalization ──────────────────────────────────────
-    if _should_apply_q4_delta(target_end_date, plan, ppop, pbt, net_income):
+    if _needs_q4_normalization(target_end_date, plan, ppop, pbt, net_income):
         (
             nii,
             total_income,

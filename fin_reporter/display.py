@@ -17,20 +17,15 @@ from fin_reporter.constants import (
     MANUFACTURING_PBT_TAGS,
     OTHER_INCOME_TAGS,
 )
-from fin_reporter.market_data import (
-    corporate_action_factor_between,
-    compute_pe_ratio,
-    fetch_other_corporate_actions_summary,
-    fetch_quarter_dividend_per_share,
-    fetch_share_price_on_date,
-    fetch_share_restructuring_events,
-    format_dividend_per_share,
-    format_pe_ratio,
-    trailing_basic_eps_sum,
-)
+from fin_reporter.market_data import format_dividend_per_share, format_pe_ratio
 from fin_reporter.metrics import build_metrics_from_file
 from fin_reporter.metrics.manufacturing import normalize_ebitda_definition
 from fin_reporter.models import DownloadResult, FinancialMetrics
+from fin_reporter.service import latest_period_end_for_results
+from fin_reporter.market_data import (
+    enrich_market_metrics,
+    enrich_market_metrics as _enrich_market_metrics,
+)
 from fin_reporter.xbrl_parser import (
     extract_facts,
     format_metric,
@@ -330,101 +325,8 @@ def _latest_period_end_for_results(
     results: list[DownloadResult],
     symbol: str,
 ) -> dt.date | None:
-    """Latest period-end date among downloaded filings for one symbol."""
-    latest: dt.date | None = None
-    for result in results:
-        if result.symbol != symbol or result.status != "DOWNLOADED":
-            continue
-        try:
-            period_end = dt.datetime.strptime(result.period, "%d-%b-%Y").date()
-        except ValueError:
-            continue
-        if latest is None or period_end > latest:
-            latest = period_end
-    return latest
-
-
-def _enrich_market_metrics(
-    metrics: FinancialMetrics,
-    file_path: str,
-    target_period: str,
-    symbol: str,
-    ebitda_definition: str,
-    market_downloader,
-    pe_anchor_date: dt.date | None = None,
-) -> FinancialMetrics:
-    """Attach trailing EPS, share price, P/E, and quarterly dividend to metrics."""
-    try:
-        period_end = dt.datetime.strptime(target_period, "%d-%b-%Y").date()
-    except ValueError:
-        period_end = None
-
-    restructuring_events = None
-    nse_symbol = None
-    cache_dir = os.path.dirname(file_path)
-    if market_downloader is not None and period_end is not None:
-        nse_symbol = market_downloader.normalize_symbol(symbol)
-        restructuring_events = fetch_share_restructuring_events(
-            market_downloader,
-            nse_symbol,
-            cache_dir=cache_dir,
-        )
-
-    eps_anchor = pe_anchor_date or period_end
-    metrics.trailing_eps = trailing_basic_eps_sum(
-        file_path,
-        target_period,
-        ebitda_definition=ebitda_definition,
-        restructuring_events=restructuring_events,
-        report_date=period_end,
-        eps_anchor_date=eps_anchor,
-    )
-
-    if market_downloader is not None and period_end is not None and nse_symbol:
-        share_price = fetch_share_price_on_date(
-            market_downloader,
-            nse_symbol,
-            period_end,
-            restructuring_events=restructuring_events,
-            cache_dir=cache_dir,
-        )
-        if (
-            share_price is not None
-            and restructuring_events
-            and eps_anchor is not None
-            and period_end < eps_anchor
-        ):
-            share_price *= corporate_action_factor_between(
-                period_end,
-                eps_anchor,
-                restructuring_events,
-            )
-        metrics.share_price = share_price
-        metrics.quarter_dividend = fetch_quarter_dividend_per_share(
-            market_downloader,
-            nse_symbol,
-            period_end,
-            cache_dir=cache_dir,
-        )
-        metrics.other_corporate_actions = fetch_other_corporate_actions_summary(
-            market_downloader,
-            nse_symbol,
-            period_end,
-            cache_dir=cache_dir,
-        )
-
-    metrics.pe_ratio = compute_pe_ratio(metrics.share_price, metrics.trailing_eps)
-
-    # Compute P/B Ratio
-    if metrics.share_price is not None and metrics.equity is not None and metrics.equity > 0:
-        if metrics.net_income is not None and metrics.basic_eps not in (None, 0):
-            implied_shares = abs(metrics.net_income) / abs(metrics.basic_eps)
-            if implied_shares > 0:
-                bvps = metrics.equity / implied_shares
-                if bvps > 0:
-                    metrics.pb_ratio = metrics.share_price / bvps
-
-    return metrics
+    """Backward-compatible alias for service.latest_period_end_for_results."""
+    return latest_period_end_for_results(results, symbol)
 
 
 def _format_metric_values(metrics: FinancialMetrics) -> dict[str, str]:
@@ -538,6 +440,7 @@ def print_metric_table(
     ebitda_definition: str = "include-other-income",
     market_downloader=None,
     display_quarters: list[str] | None = None,
+    precomputed_metrics: dict[str, dict[str, FinancialMetrics]] | None = None,
 ) -> None:
     """Print financial metrics in symbol or multi-quarter grouped view."""
     basis_note = (
@@ -571,6 +474,79 @@ def print_metric_table(
         )
         return
 
+    if precomputed_metrics is not None:
+        quarter_order = list(display_quarters or [])
+        if not quarter_order:
+            for result in successful:
+                quarter_label = (result.quarter_label or quarter).upper()
+                if quarter_label not in quarter_order:
+                    quarter_order.append(quarter_label)
+        symbols = list(precomputed_metrics.keys())
+        any_manufacturing = False
+        multi_quarter = len(quarter_order) > 1
+        if not multi_quarter:
+            flat_metrics = {
+                sym: next(iter(quarters.values()))
+                for sym, quarters in precomputed_metrics.items()
+                if quarters
+            }
+            company_types = {m.company_type for m in flat_metrics.values()}
+            metric_rows = _metric_rows_for_company_types(company_types)
+            formatted = {
+                symbol: _format_metric_values(metrics)
+                for symbol, metrics in flat_metrics.items()
+            }
+            title = f"FINANCIAL METRIC TABLE | PERIOD: {quarter.upper()}"
+            _render_metric_grid(
+                title,
+                metric_rows,
+                list(flat_metrics.keys()),
+                formatted,
+                basis_note=basis_note,
+            )
+            if "manufacturing" in company_types:
+                print(
+                    f"[Info] EBITDA: "
+                    f"{_format_ebitda_definition_label(ebitda_definition)}"
+                )
+        else:
+            for symbol in symbols:
+                quarter_metrics = precomputed_metrics.get(symbol, {})
+                company_types = {
+                    metrics.company_type for metrics in quarter_metrics.values()
+                }
+                any_manufacturing = any_manufacturing or (
+                    "manufacturing" in company_types
+                )
+                metric_rows = _metric_rows_for_company_types(company_types)
+                formatted: dict[str, dict[str, str]] = {}
+                for quarter_label in quarter_order:
+                    metrics = quarter_metrics.get(quarter_label)
+                    formatted[quarter_label] = (
+                        _format_metric_values(metrics) if metrics else {}
+                    )
+                title = f"FINANCIAL METRIC TABLE | SYMBOL: {symbol}"
+                _render_metric_grid(
+                    title,
+                    metric_rows,
+                    quarter_order,
+                    formatted,
+                    basis_note=basis_note,
+                )
+            if any_manufacturing:
+                print(
+                    f"[Info] EBITDA: "
+                    f"{_format_ebitda_definition_label(ebitda_definition)}"
+                )
+        if debug_tags:
+            debug_results = [
+                result
+                for result in results
+                if result.status == "DOWNLOADED" and result.file_path != "-"
+            ]
+            _print_ebitda_tag_discovery(debug_results)
+        return
+
     quarter_order: list[str] = []
     for result in successful:
         quarter_label = (result.quarter_label or quarter).upper()
@@ -589,12 +565,11 @@ def print_metric_table(
                 result.period,
                 ebitda_definition=ebitda_definition,
             )
-            raw_metrics[result.symbol] = _enrich_market_metrics(
+            raw_metrics[result.symbol] = enrich_market_metrics(
                 metrics,
                 result.file_path,
                 result.period,
                 result.symbol,
-                ebitda_definition,
                 market_downloader,
             )
 
@@ -626,6 +601,54 @@ def print_metric_table(
                     successful,
                     symbol,
                 )
+        from fin_reporter.market_data import (
+            CorporateActionsContext,
+            fetch_share_restructuring_events,
+            trailing_basic_eps_for_anchor,
+        )
+
+        trailing_eps_by_symbol: dict[str, float | None] = {}
+        corporate_actions_by_symbol: dict[str, CorporateActionsContext] = {}
+        for symbol in symbols:
+            anchor_date = symbol_anchors.get(symbol)
+            anchor_result = None
+            for item in successful:
+                if item.symbol != symbol:
+                    continue
+                try:
+                    period_end = dt.datetime.strptime(
+                        item.period, "%d-%b-%Y"
+                    ).date()
+                except ValueError:
+                    continue
+                if period_end == anchor_date:
+                    anchor_result = item
+                    break
+            if anchor_result is None:
+                trailing_eps_by_symbol[symbol] = None
+                continue
+            ca_context = CorporateActionsContext(
+                market_downloader,
+                os.path.dirname(anchor_result.file_path),
+            )
+            corporate_actions_by_symbol[symbol] = ca_context
+            if market_downloader is not None:
+                nse_symbol = market_downloader.normalize_symbol(symbol)
+                restructuring = fetch_share_restructuring_events(
+                    market_downloader,
+                    nse_symbol,
+                    cache_dir=os.path.dirname(anchor_result.file_path),
+                    corporate_actions=ca_context,
+                )
+                trailing_eps_by_symbol[symbol] = trailing_basic_eps_for_anchor(
+                    anchor_result.file_path,
+                    anchor_result.period,
+                    restructuring_events=restructuring,
+                    eps_anchor_date=anchor_date,
+                )
+            else:
+                trailing_eps_by_symbol[symbol] = None
+
         for result in successful:
             symbol = result.symbol
             quarter_label = (result.quarter_label or quarter).upper()
@@ -635,14 +658,15 @@ def print_metric_table(
                 ebitda_definition=ebitda_definition,
             )
             symbol_metrics.setdefault(symbol, {})[quarter_label] = (
-                _enrich_market_metrics(
+                enrich_market_metrics(
                     metrics,
                     result.file_path,
                     result.period,
                     symbol,
-                    ebitda_definition,
                     market_downloader,
                     pe_anchor_date=symbol_anchors.get(symbol),
+                    trailing_eps=trailing_eps_by_symbol.get(symbol),
+                    corporate_actions=corporate_actions_by_symbol.get(symbol),
                 )
             )
 
