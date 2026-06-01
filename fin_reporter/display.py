@@ -29,6 +29,7 @@ from fin_reporter.market_data import (
     trailing_basic_eps_sum,
 )
 from fin_reporter.metrics import build_metrics_from_file
+from fin_reporter.metrics.manufacturing import normalize_ebitda_definition
 from fin_reporter.models import DownloadResult, FinancialMetrics
 from fin_reporter.xbrl_parser import (
     extract_facts,
@@ -98,6 +99,15 @@ def print_results_table(
     print(
         f"\n[Summary] Downloaded {downloaded}/{len(results)} "
         f"files for {quarter.upper()}."
+    )
+
+
+def _format_ebitda_definition_label(ebitda_definition: str) -> str:
+    mode = normalize_ebitda_definition(ebitda_definition)
+    return (
+        "exclude other income"
+        if mode == "exclude-other-income"
+        else "include other income"
     )
 
 
@@ -525,7 +535,7 @@ def print_metric_table(
     results: list[DownloadResult],
     quarter: str,
     debug_tags: bool = False,
-    ebitda_definition: str = "tickertape",
+    ebitda_definition: str = "include-other-income",
     market_downloader=None,
     display_quarters: list[str] | None = None,
 ) -> None:
@@ -603,7 +613,7 @@ def print_metric_table(
             basis_note=basis_note,
         )
         if "manufacturing" in company_types:
-            print(f"[Info] EBITDA definition: {ebitda_definition}")
+            print(f"[Info] EBITDA: {_format_ebitda_definition_label(ebitda_definition)}")
     else:
         symbols: list[str] = []
         symbol_metrics: dict[str, dict[str, FinancialMetrics]] = {}
@@ -663,7 +673,7 @@ def print_metric_table(
             )
 
         if any_manufacturing:
-            print(f"[Info] EBITDA definition: {ebitda_definition}")
+            print(f"[Info] EBITDA: {_format_ebitda_definition_label(ebitda_definition)}")
 
     if debug_tags:
         debug_results = [

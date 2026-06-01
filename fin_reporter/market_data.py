@@ -247,7 +247,7 @@ def eps_adjustment_factor_to_report_date(
 def trailing_basic_eps_sum(
     file_path: str,
     target_period: str,
-    ebitda_definition: str = "tickertape",
+    ebitda_definition: str = "include-other-income",
     restructuring_events: list[tuple[dt.date, float]] | None = None,
     report_date: dt.date | None = None,
     eps_anchor_date: dt.date | None = None,

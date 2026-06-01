@@ -134,7 +134,7 @@ class FinancialReporterAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         anchor_quarter = params.get("quarter", ["Q4_FY26"])[0].strip().upper()
         back_quarters_raw = params.get("back_quarters", ["10"])[0].strip()
-        ebitda_definition = params.get("ebitda_definition", ["tickertape"])[0].strip()
+        ebitda_definition = params.get("ebitda_definition", ["include-other-income"])[0].strip()
 
         try:
             back_quarters = int(back_quarters_raw)

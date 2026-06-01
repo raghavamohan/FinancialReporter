@@ -68,7 +68,7 @@ const DOM = {
     quarterSelect: document.getElementById("quarter-select"),
     slider: document.getElementById("back-quarters-slider"),
     sliderVal: document.getElementById("back-quarters-val"),
-    ebitdaDef: document.getElementById("ebitda-definition"),
+    ebitdaExcludeOtherIncome: document.getElementById("exclude-other-income"),
     analyzeBtn: document.getElementById("analyze-btn"),
     offlineBadge: document.getElementById("offline-badge"),
     networkBadge: document.getElementById("network-badge"),
@@ -85,6 +85,7 @@ const DOM = {
     metricsSelectedTags: document.getElementById("metrics-selected-tags"),
     metricsDropdown: document.getElementById("metrics-dropdown"),
     metricsDropdownList: document.getElementById("metrics-dropdown-list"),
+    chartLegendPanel: document.getElementById("chart-legend-panel"),
 };
 
 // Initialize Dashboard
@@ -388,7 +389,9 @@ async function analyzePerformance(e) {
         symbols: state.selectedSymbols.join(","),
         quarter: DOM.quarterSelect.value,
         back_quarters: DOM.slider.value,
-        ebitda_definition: DOM.ebitdaDef.value
+        ebitda_definition: DOM.ebitdaExcludeOtherIncome.checked
+            ? "exclude-other-income"
+            : "include-other-income"
     });
 
     try {
@@ -633,6 +636,8 @@ function plotTrendsChart() {
         state.chartInstance.destroy();
     }
 
+    DOM.chartLegendPanel.innerHTML = "";
+
     const labels = [...data.display_quarters].reverse(); // Oldest to newest
     const datasets = [];
     let colorIdx = 0;
@@ -667,6 +672,7 @@ function plotTrendsChart() {
             const isFill = m.chartType === "bar" || m.fmt === "cr";
             datasets.push({
                 label: `${symbol} ${m.label}`,
+                metricKey: m.key,
                 data: values,
                 borderColor: col.primary,
                 backgroundColor: isFill ? col.secondary : "transparent",
@@ -694,12 +700,7 @@ function plotTrendsChart() {
             },
             plugins: {
                 legend: {
-                    labels: {
-                        color: "#9ca3af",
-                        font: { family: "Inter", weight: 600, size: 11 },
-                        usePointStyle: true,
-                        pointStyle: 'circle',
-                    }
+                    display: false,
                 },
                 tooltip: {
                     backgroundColor: 'rgba(13, 18, 33, 0.92)',
@@ -722,6 +723,75 @@ function plotTrendsChart() {
                 }
             }
         }
+    });
+
+    renderChartLegend(state.chartInstance);
+}
+
+/**
+ * Build a checkbox legend for the chart — one checkbox per metric key.
+ * Toggling a checkbox shows/hides that metric for all companies on the chart.
+ */
+function renderChartLegend(chart) {
+    const panel = DOM.chartLegendPanel;
+    panel.innerHTML = "";
+
+    const datasets = chart.data.datasets;
+    if (!datasets.length) {
+        panel.classList.add("hidden");
+        return;
+    }
+
+    panel.classList.remove("hidden");
+
+    const keysInChart = new Set(datasets.map(ds => ds.metricKey).filter(Boolean));
+    const metricOrder = getChartableMetrics()
+        .map(m => m.key)
+        .filter(key => keysInChart.has(key));
+
+    const swatchByKey = {};
+    datasets.forEach(ds => {
+        if (ds.metricKey && !swatchByKey[ds.metricKey]) {
+            swatchByKey[ds.metricKey] = ds.borderColor;
+        }
+    });
+
+    metricOrder.forEach(key => {
+        const meta = METRICS_BY_KEY[key];
+        const labelText = meta ? meta.label : key;
+        const swatchColor = swatchByKey[key] || "#6366f1";
+
+        const item = document.createElement("label");
+        item.className = "chart-legend-item";
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = true;
+        checkbox.setAttribute("data-metric-key", key);
+
+        const swatch = document.createElement("span");
+        swatch.className = "chart-legend-swatch";
+        swatch.style.backgroundColor = swatchColor;
+
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "chart-legend-label";
+        labelSpan.textContent = labelText;
+
+        item.appendChild(checkbox);
+        item.appendChild(swatch);
+        item.appendChild(labelSpan);
+
+        checkbox.addEventListener("change", () => {
+            chart.data.datasets.forEach((ds, i) => {
+                if (ds.metricKey === key) {
+                    chart.setDatasetVisibility(i, checkbox.checked);
+                }
+            });
+            chart.update();
+            item.classList.toggle("unchecked", !checkbox.checked);
+        });
+
+        panel.appendChild(item);
     });
 }
 

@@ -56,15 +56,15 @@ Symbols are uppercased automatically. The alias `HDFC` is normalized to `HDFCBAN
 | `--output` | No | `.\xbrl_downloads` | Directory for cached XBRL files |
 | `--timeout` | No | `20` | HTTP timeout per request (seconds) |
 | `--delay` | No | `2.0` | Pause between symbol requests (seconds) |
-| `--ebitda-definition` | No | `tickertape` | Manufacturing EBITDA only (see below) |
+| `--ebitda-definition` | No | `include-other-income` | Manufacturing EBITDA only (see below) |
 | `--debug-tags` | No | off | Print candidate XBRL tags for EBITDA-related fields (manufacturing) |
 
 #### `--ebitda-definition` (manufacturing only)
 
 | Value | Formula (simplified) |
 |-------|----------------------|
-| `tickertape` | Prefer segment PBT + segment finance cost + depreciation; otherwise PBT (pre-exceptional where available) + finance cost + depreciation |
-| `subtract-other-income` | Same base components, then subtract **Other Income** |
+| `include-other-income` | Prefer segment PBT + segment finance cost + depreciation; otherwise PBT (pre-exceptional where available) + finance cost + depreciation |
+| `exclude-other-income` | Same base components, then subtract **Other Income** |
 
 Banks do not use EBITDA; this flag applies only when manufacturing filers are in the run.
 
@@ -109,7 +109,7 @@ python fin_report.py --symbols SBIN ICICIBANK --quarter Q2_FY26 --output D:\data
 Manufacturing EBITDA and tag debugging:
 
 ```powershell
-python fin_report.py --symbols RELIANCE --quarter Q3_FY26 --ebitda-definition subtract-other-income --debug-tags
+python fin_report.py --symbols RELIANCE --quarter Q3_FY26 --ebitda-definition exclude-other-income --debug-tags
 ```
 
 Use cache only (no NSE session if every required file is already present):
@@ -219,7 +219,7 @@ from fin_reporter.metrics import build_metrics_from_file
 metrics = build_metrics_from_file(
     "xbrl_downloads/RELIANCE_Q4_FY26_XBRL.xml",
     "31-Mar-2026",
-    ebitda_definition="tickertape",
+    ebitda_definition="include-other-income",
 )
 print(metrics.company_type, metrics.revenue, metrics.ebitda)
 ```

@@ -5,8 +5,8 @@ Indian Accounting Standards (Ind-AS). Metrics include Revenue from
 Operations, EBITDA, PBIT (EBIT), PBT, Net Income, and EPS.
 
 EBITDA is computed using a selectable definition:
-    - tickertape: PBT (before exceptionals) + Finance Costs + Depreciation
-    - subtract-other-income: previous formula that subtracts Other Income
+    - include-other-income: PBT (before exceptionals) + Finance Costs + Depreciation
+    - exclude-other-income: same base formula, then subtract Other Income
 """
 
 import datetime as dt
@@ -46,10 +46,23 @@ from fin_reporter.xbrl_parser import (
 
 
 _NAMESPACE_MODE = "ind-as"
-_DEFAULT_EBITDA_DEFINITION = "tickertape"
-_SUPPORTED_EBITDA_DEFINITIONS = ("tickertape", "subtract-other-income")
+_DEFAULT_EBITDA_DEFINITION = "include-other-income"
+_SUPPORTED_EBITDA_DEFINITIONS = ("include-other-income", "exclude-other-income")
+_EBITDA_DEFINITION_ALIASES = {
+    "tickertape": "include-other-income",
+    "subtract-other-income": "exclude-other-income",
+}
 
-# For EBITDA calculation in "subtract-other-income" mode, prefer PBT *before*
+
+def normalize_ebitda_definition(ebitda_definition: str) -> str:
+    """Map legacy EBITDA mode names to the current include/exclude-other-income values."""
+    normalized = _EBITDA_DEFINITION_ALIASES.get(ebitda_definition, ebitda_definition)
+    if normalized in _SUPPORTED_EBITDA_DEFINITIONS:
+        return normalized
+    return _DEFAULT_EBITDA_DEFINITION
+
+
+# For EBITDA calculation in exclude-other-income mode, prefer PBT *before*
 # exceptional items so that one-off charges don't distort the operating
 # performance measure.
 # The standard PBT row (for display) continues to use MANUFACTURING_PBT_TAGS
@@ -76,10 +89,10 @@ def _calculate_ebitda(
     """Compute EBITDA from PBT (pre-exceptional), finance costs, and depreciation.
 
     Definitions:
-        - tickertape:
+        - include-other-income:
             EBITDA = SegmentProfitBeforeTax + SegmentFinanceCosts + Depreciation
             Falls back to PBT/Finance Costs tags if segment tags are absent.
-        - subtract-other-income:
+        - exclude-other-income:
             EBITDA = PBT (before exceptionals) + Finance Cost
                      + Depreciation − Other Income
 
@@ -97,7 +110,7 @@ def _calculate_ebitda(
     if depreciation is None:
         return None
 
-    if ebitda_definition == "tickertape":
+    if normalize_ebitda_definition(ebitda_definition) == "include-other-income":
         pbt_for_ebitda = pick_value_for_plan(
             facts,
             _SEGMENT_EBITDA_PBT_TAGS,
@@ -123,7 +136,7 @@ def _calculate_ebitda(
             return pbt_for_ebitda + finance_for_ebitda + depreciation
         return None
 
-    # subtract-other-income mode
+    # exclude-other-income mode
     pbt_for_ebitda = pick_value_for_plan(
         facts,
         _EBITDA_PBT_TAGS,
@@ -231,14 +244,13 @@ def build_manufacturing_metrics(
     """
     target_end_date = dt.datetime.strptime(target_period, "%d-%b-%Y").date()
     warnings: list[str] = []
-    ebitda_mode = (
-        ebitda_definition
-        if ebitda_definition in _SUPPORTED_EBITDA_DEFINITIONS
-        else _DEFAULT_EBITDA_DEFINITION
-    )
-    if ebitda_mode != ebitda_definition:
+    ebitda_mode = normalize_ebitda_definition(ebitda_definition)
+    if (
+        ebitda_definition not in _SUPPORTED_EBITDA_DEFINITIONS
+        and ebitda_definition not in _EBITDA_DEFINITION_ALIASES
+    ):
         warnings.append(
-            "Unsupported EBITDA definition; using tickertape"
+            "Unsupported EBITDA definition; using include-other-income"
         )
 
     # Resolve the period context plan using Revenue as the probe tag.

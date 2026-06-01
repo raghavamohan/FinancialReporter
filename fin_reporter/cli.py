@@ -69,12 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ebitda-definition",
         type=str,
-        choices=("tickertape", "subtract-other-income"),
-        default="tickertape",
+        choices=("include-other-income", "exclude-other-income"),
+        default="include-other-income",
         help=(
             "EBITDA definition for manufacturing companies: "
-            "'tickertape' = PBT + finance cost + depreciation; "
-            "'subtract-other-income' subtracts Other Income."
+            "'include-other-income' (default) or 'exclude-other-income'."
         ),
     )
     return parser.parse_args()

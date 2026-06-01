@@ -81,11 +81,12 @@
 
                     <!-- EBITDA Setting -->
                     <div class="form-group">
-                        <label for="ebitda-definition">EBITDA Formula Definition</label>
-                        <select id="ebitda-definition">
-                            <option value="tickertape">Tickertape (Standard Operating + Other Income)</option>
-                            <option value="subtract-other-income">Subtract Other Income (Pure Core Operating)</option>
-                        </select>
+                        <span class="form-group-label">EBITDA Calculation</span>
+                        <label class="checkbox-label" for="exclude-other-income">
+                            <input type="checkbox" id="exclude-other-income">
+                            Exclude other income
+                        </label>
+                        <small class="help-text">When unchecked, other income is included in the EBITDA formula.</small>
                     </div>
 
                     <!-- Metrics Picker -->
@@ -133,6 +134,7 @@
                             <h3><i class="fa-solid fa-chart-area"></i> Performance Trends</h3>
                         </div>
                         <hr class="glow-divider">
+                        <div id="chart-legend-panel" class="chart-legend-panel"></div>
                         <div class="canvas-wrapper">
                             <canvas id="trends-chart"></canvas>
                         </div>
