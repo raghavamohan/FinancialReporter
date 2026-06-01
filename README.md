@@ -1,10 +1,12 @@
 # FinancialReporter
 
-Command-line tool that downloads quarterly financial result filings in XBRL format from the [National Stock Exchange of India (NSE)](https://www.nseindia.com/) and prints download status and financial metrics in terminal tables.
+Command-line tool and **interactive web dashboard** that downloads quarterly financial result filings in XBRL format from the [National Stock Exchange of India (NSE)](https://www.nseindia.com/) and presents download status and financial metrics in terminal tables or in the browser.
 
 Symbols are NSE tickers (for example `RELIANCE`, `HDFCBANK`, `ITC`). The tool fetches filings when needed, caches files under a local folder, parses XBRL facts, and computes quarter-level metrics. **Banks** (IN-GAAP) and **manufacturing** companies (Ind-AS) are detected automatically from filing tags.
 
 ## Features
+
+### CLI
 
 - Downloads XBRL from NSE **integrated** and **legacy** financial-results APIs, with automatic fallback
 - Reuses cached files when present; skips NSE session warmup when nothing new is required
@@ -14,11 +16,23 @@ Symbols are NSE tickers (for example `RELIANCE`, `HDFCBANK`, `ITC`). The tool fe
 - **Q4 handling:** derives quarter figures from cumulative contexts when direct quarter tags are missing; banks can use FY − prior YTD when earlier-quarter files exist in the same output folder
 - Configurable manufacturing **EBITDA** formula and optional XBRL tag discovery for debugging
 
+### Web dashboard
+
+- Browser UI served by [`app.py`](app.py) with a REST API for symbols, quarters, and metrics
+- Multi-company comparison with **Performance Trends** chart (Chart.js time series)
+- **Chart metric checkboxes** — one checkbox per metric toggles that series on/off for all companies on the chart (replaces Chart.js legend click/strikethrough)
+- **Metrics picker** in the sidebar — filter which parameters appear in tables and charts; leave empty to show all applicable metrics
+- **Company tabs** — per-symbol metrics table and corporate-actions timeline
+- **EBITDA calculation** checkbox (manufacturing only): exclude other income from the EBITDA formula when checked
+- CSV export of computed metrics
+- Offline badge when all requested filings load from local cache
+
 ## Requirements
 
 - Python 3.10+ (3.12 tested)
 - [requests](https://pypi.org/project/requests/) (see `requirements.txt`)
 - Network access to NSE for downloads (no API key)
+- Modern browser for the web dashboard (Chart.js loaded from CDN)
 
 ## Installation
 
@@ -32,7 +46,55 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Usage
+## Web dashboard
+
+Start the local server (default port **8080**, cache under `.\xbrl_downloads`):
+
+```powershell
+python app.py
+python app.py --port 8080 --cache-dir .\xbrl_downloads
+```
+
+Open [http://localhost:8080/](http://localhost:8080/) in your browser.
+
+### Control panel
+
+| Control | Description |
+|---------|-------------|
+| **Select Companies** | Multi-symbol picker with Nifty 50 suggestions; cached symbols are marked |
+| **Anchor Quarter** | Fiscal quarter code (for example `Q4_FY26`) |
+| **Trailing Quarters** | Slider (1–12): how many quarters to display, counting back from the anchor |
+| **EBITDA Calculation** | Checkbox: *Exclude other income* (manufacturing only). Unchecked = include other income in EBITDA |
+| **Metrics to Display** | Searchable multi-select; limits table rows and chart series. Empty = all sector-applicable metrics |
+| **Analyze Performance** | Fetches/cache XBRL, computes metrics, renders chart and tables |
+
+### Results area
+
+1. **Performance Trends** — multi-company chart over trailing quarters. Above the chart, **checkboxes** (one per metric) control which metrics are drawn. Unchecking hides that metric for every company on the chart; labels dim when unchecked (no strikethrough).
+2. **Company tabs** — metrics table (quarters as columns) and corporate-actions timeline per symbol.
+3. **Export metrics to CSV** — full metric dump for the current run.
+
+Mixed bank + manufacturing runs show sector-appropriate rows (for example Revenue vs Total Income, EBITDA vs PPOP).
+
+### REST API
+
+All endpoints are `GET` with JSON responses.
+
+| Endpoint | Parameters | Description |
+|----------|------------|-------------|
+| `/api/symbols` | — | Nifty 50 + symbols found in cache (`symbols`, `cached` arrays) |
+| `/api/quarters` | — | Supported quarter codes (`Q4_FY23` … `Q4_FY26`) |
+| `/api/metrics` | `symbols` (comma-separated), `quarter`, `back_quarters`, `ebitda_definition` | Download/cache filings, compute metrics, return JSON |
+
+Example:
+
+```powershell
+curl "http://localhost:8080/api/metrics?symbols=HDFCBANK,RELIANCE&quarter=Q4_FY26&back_quarters=8&ebitda_definition=include-other-income"
+```
+
+`ebitda_definition` accepts `include-other-income` (default) or `exclude-other-income`. Legacy values `tickertape` and `subtract-other-income` are still accepted and mapped automatically.
+
+## CLI usage
 
 Run from the project root using either entry point:
 
@@ -66,7 +128,14 @@ Symbols are uppercased automatically. The alias `HDFC` is normalized to `HDFCBAN
 | `include-other-income` | Prefer segment PBT + segment finance cost + depreciation; otherwise PBT (pre-exceptional where available) + finance cost + depreciation |
 | `exclude-other-income` | Same base components, then subtract **Other Income** |
 
-Banks do not use EBITDA; this flag applies only when manufacturing filers are in the run.
+**Legacy aliases** (still accepted in CLI, API, and programmatic calls):
+
+| Legacy value | Maps to |
+|--------------|---------|
+| `tickertape` | `include-other-income` |
+| `subtract-other-income` | `exclude-other-income` |
+
+Banks do not use EBITDA. For banks, **PPOP** (Pre-Provision Operating Profit) is the operating-profit metric shown instead — it is the banking analogue of manufacturing EBITDA because interest is core business income, not a financing cost to add back.
 
 ### Quarter codes
 
@@ -82,6 +151,7 @@ Indian FY convention (examples for `FY26` = year ending 31-Mar-2026):
 With `--back-quarters 4` and `--quarter Q4_FY26`, the tool processes `Q4_FY26`, `Q3_FY26`, `Q2_FY26`, and `Q1_FY26` in that order.
 
 For trailing EPS and P/E, the tool also downloads up to three quarters **before** the oldest displayed quarter (not shown in the metrics table). Those appear in the download results table with `(trailing EPS support, not in metrics table)` in the message.
+
 Corporate actions used for dividend and bonus/split handling are cached locally under `<output>/.market_cache/` to avoid repeated NSE calls across runs.
 
 If `--quarter` is a date (for example `30-Jun-2025`), `--back-quarters` steps backward by calendar quarter ends instead of FY codes.
@@ -126,6 +196,15 @@ When all primary (and any required standalone) files exist locally:
 
 Cached hits still appear as `DOWNLOADED` with source `cached` in the results table.
 
+### Cache prewarm (optional)
+
+Pre-download Nifty 50 XBRL and market-data cache for faster dashboard use:
+
+```powershell
+python .\scripts\prewarm_nifty50_cache.py
+python .\scripts\prewarm_nifty50_cache.py --quarter Q4_FY26 --quarters 13
+```
+
 ## Output
 
 ### 1. Download results table
@@ -157,8 +236,8 @@ Row sets depend on company type detected in each filing:
 |-----------|--------|
 | Net Interest Income | Interest earned − interest expended |
 | Total Income | Interest earned + other income |
-| PPOP | Pre-provision operating profit |
-| PBT | Profit before tax |
+| PPOP | Pre-provision operating profit; banking equivalent of manufacturing EBITDA |
+| PBT | Profit before tax (after provisions) |
 | Net Income | |
 | Basic EPS | Not scaled to crore |
 | P/E Ratio | Share price on period end ÷ trailing four-quarter basic EPS, with older EPS adjusted for bonus/split ex-dates after each quarter (needs prior-quarter XBRL in `--output`) |
@@ -167,6 +246,7 @@ Row sets depend on company type detected in each filing:
 | ROA (%) | Annualized when reported as a decimal on a quarter context |
 | Gross NPA (%) | May use standalone fallback if consolidated missing |
 | Net NPA (%) | Same fallback behavior |
+| Cost-to-Income (%) | Operating efficiency ratio (dashboard / extended metrics) |
 
 **Manufacturing (Ind-AS)**
 
@@ -181,15 +261,19 @@ Row sets depend on company type detected in each filing:
 | P/E Ratio | Same as banking row |
 | Dividend (Rs/sh) | Same as banking row |
 | Other Corporate Actions | Same as banking row |
+| Gross Profit / Gross Margin | Dashboard / extended metrics |
+| EBITDA Margin / Net Margin | Dashboard / extended metrics |
+| ROCE (%) | Return on capital employed |
 
 If a single run mixes banks and non-banks, a combined row layout is used (for example Revenue / NII and EBITDA / PPOP columns).
 
-After manufacturing tables, the CLI prints which EBITDA definition was used. With `--debug-tags`, tag discovery runs after the metrics tables.
+After manufacturing tables, the CLI prints which EBITDA mode was used (for example `[Info] EBITDA: include other income`). With `--debug-tags`, tag discovery runs after the metrics tables.
 
 ## Project layout
 
 ```
 FinancialReporter/
+├── app.py                     # Web dashboard + REST API server
 ├── fin_report.py              # CLI wrapper → fin_reporter.cli
 ├── fin_reporter/
 │   ├── __main__.py            # python -m fin_reporter
@@ -197,13 +281,20 @@ FinancialReporter/
 │   ├── constants.py           # XBRL tag mappings
 │   ├── models.py              # DownloadResult, FinancialMetrics, …
 │   ├── downloader.py          # NSE session and downloads
+│   ├── market_data.py         # Share prices, dividends, trailing EPS
 │   ├── xbrl_parser.py         # XBRL parsing and metadata
 │   ├── period_resolver.py     # Quarter contexts and Q4 deltas
 │   ├── display.py             # Console tables
 │   └── metrics/
 │       ├── base.py            # Bank vs manufacturing detection
-│       ├── banking.py         # IN-GAAP metrics
+│       ├── banking.py         # IN-GAAP metrics (NII, PPOP, NPA, …)
 │       └── manufacturing.py   # Ind-AS metrics and EBITDA
+├── frontend/
+│   ├── index.html             # Dashboard SPA shell
+│   ├── app.js                 # Metrics registry, chart, tables, API client
+│   └── style.css              # Glassmorphic UI styles
+├── scripts/
+│   └── prewarm_nifty50_cache.py
 ├── requirements.txt
 ├── LICENSE                    # Apache License 2.0
 └── xbrl_downloads/            # Default cache (gitignored; created at runtime)
@@ -224,12 +315,15 @@ metrics = build_metrics_from_file(
 print(metrics.company_type, metrics.revenue, metrics.ebitda)
 ```
 
+Legacy `ebitda_definition="tickertape"` is normalized to `include-other-income` automatically.
+
 ## Notes and limitations
 
 - NSE may block or throttle automated access; increase `--delay` and retry if downloads fail.
 - Not every symbol/quarter has XBRL on NSE; missing filings show as `NOT_FOUND`.
 - Metrics depend on tags in each filing; missing values appear as `-` in the table.
 - Delete cached files under `--output` to force a fresh download.
+- The web dashboard requires network on first fetch per symbol/quarter; subsequent loads can be fully offline when cache is warm.
 - This tool is for research and education; verify figures against official filings before any investment or compliance use.
 
 ## License

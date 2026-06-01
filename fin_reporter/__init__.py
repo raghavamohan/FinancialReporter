@@ -1,12 +1,19 @@
 """
 fin_reporter — NSE XBRL financial metrics extraction and reporting.
 
+Supports a CLI (``python -m fin_reporter`` / ``fin_report.py``), a web dashboard
+(``app.py``), and programmatic imports. Banks (IN-GAAP) and manufacturing
+companies (Ind-AS) are auto-detected; manufacturing EBITDA uses
+``include-other-income`` or ``exclude-other-income`` (legacy ``tickertape`` /
+``subtract-other-income`` aliases are accepted).
+
 Modules:
     constants        XBRL tag definitions and namespace mappings
     models           Data classes for results, metadata, metrics
     xbrl_parser      XBRL XML parsing and fact extraction
     period_resolver  Quarter/period context resolution
     downloader       NSE XBRL file download
+    market_data      Share prices, dividends, trailing EPS enrichment
     metrics          Financial metric calculators (bank / manufacturing)
     display          Table formatting and output
     cli              Command-line interface
