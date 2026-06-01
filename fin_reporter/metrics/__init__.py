@@ -12,12 +12,14 @@ __all__ = [
 ]
 
 
+_METRICS_CACHE = {}
+
 def build_metrics_from_file(
     file_path: str,
     target_period: str,
     ebitda_definition: str = "tickertape",
 ) -> FinancialMetrics:
-    """Build financial metrics from an XBRL file.
+    """Build financial metrics from an XBRL file (with in-memory caching).
 
     Auto-detects whether the filing is from a bank or manufacturing company
     and dispatches to the appropriate calculator.
@@ -30,11 +32,17 @@ def build_metrics_from_file(
     Returns:
         FinancialMetrics with populated fields appropriate to the company type.
     """
+    key = (file_path, target_period, ebitda_definition)
+    if key in _METRICS_CACHE:
+        return _METRICS_CACHE[key]
+
     facts, _contexts = extract_facts(file_path)
     if not facts:
-        return FinancialMetrics(
+        metrics = FinancialMetrics(
             warnings=["No parseable XBRL facts found in file"],
         )
+        _METRICS_CACHE[key] = metrics
+        return metrics
 
     filing_meta = extract_filing_metadata(file_path)
     company_type = detect_company_type(facts)
@@ -51,4 +59,5 @@ def build_metrics_from_file(
 
     metrics.company_type = company_type
     metrics.filing_nature = filing_meta.nature
+    _METRICS_CACHE[key] = metrics
     return metrics

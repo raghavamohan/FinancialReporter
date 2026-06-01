@@ -26,6 +26,7 @@ from fin_reporter.period_resolver import (
     trailing_eps_support_quarters,
 )
 from fin_reporter.xbrl_parser import extract_filing_metadata
+from fin_reporter.timing import time_block
 
 
 class NSEXBRLDownloader:
@@ -88,6 +89,7 @@ class NSEXBRLDownloader:
         self.lookup_symbol_fallbacks = {
             "TATAMOTORS": ("TATAMTRDVR",),
         }
+        self.skip_standalone_companion = False
 
     # ─── Session management ──────────────────────────────────────────
 
@@ -785,13 +787,20 @@ class NSEXBRLDownloader:
                 )
                 if not cached_path:
                     return True
+                if getattr(self, "skip_standalone_companion", False):
+                    continue
                 metadata = extract_filing_metadata(cached_path)
                 nature = metadata.nature.strip().lower()
                 if "consolidated" in nature and "standalone" not in nature:
                     if not self._find_cached_filing_file(
                         output_dir, symbol, label, "STANDALONE"
                     ):
-                        return True
+                        notfound_path = os.path.join(
+                            output_dir,
+                            f"{symbol}_{label}_STANDALONE.notfound",
+                        )
+                        if not os.path.exists(notfound_path):
+                            return True
         return False
 
     def _result_from_cached_file(
@@ -830,36 +839,62 @@ class NSEXBRLDownloader:
         file_basis: str,
     ) -> None:
         """Download standalone XBRL when consolidated is cached but companion is not."""
-        if file_basis != "consolidated":
-            return
-        standalone_path = self._find_cached_filing_file(
-            output_dir, symbol, quarter_label, "STANDALONE"
-        )
-        if standalone_path:
-            return
-        standalone_filing, _src, _err = self.resolve_filing_with_fallback(
-            symbol,
-            target_period,
-            prefer_standalone=True,
-        )
-        if not standalone_filing:
-            return
-        standalone_basis = self._infer_filing_basis(standalone_filing)
-        standalone_url = self._resolve_xbrl_url(standalone_filing)
-        if standalone_basis != "standalone" or not standalone_url:
-            return
-        if not standalone_url.startswith("http"):
-            standalone_url = self.base_url + standalone_url
-        standalone_path = os.path.join(
-            output_dir,
-            self._build_standalone_file_name(
+        with time_block(category="Companion Standalone Check", detail=f"symbol={symbol}, quarter={quarter_label}"):
+            if getattr(self, "skip_standalone_companion", False):
+                return
+            if file_basis != "consolidated":
+                return
+            standalone_path = self._find_cached_filing_file(
+                output_dir, symbol, quarter_label, "STANDALONE"
+            )
+            if standalone_path:
+                return
+
+            notfound_path = os.path.join(
+                output_dir,
+                f"{symbol}_{quarter_label}_STANDALONE.notfound",
+            )
+            if os.path.exists(notfound_path):
+                return
+
+            standalone_filing, _src, _err = self.resolve_filing_with_fallback(
                 symbol,
-                quarter_label,
-                standalone_url,
-            ),
-        )
-        if not os.path.exists(standalone_path):
-            self._download_file(standalone_url, standalone_path)
+                target_period,
+                prefer_standalone=True,
+            )
+            if not standalone_filing:
+                with open(notfound_path, "w") as f:
+                    f.write(f"Not found on NSE at {dt.datetime.now().isoformat()}")
+                print(f"[+] Marked standalone companion for {symbol} ({quarter_label}) as NOT_FOUND locally.")
+                return
+
+            standalone_basis = self._infer_filing_basis(standalone_filing)
+            standalone_url = self._resolve_xbrl_url(standalone_filing)
+            if standalone_basis != "standalone" or not standalone_url:
+                with open(notfound_path, "w") as f:
+                    f.write(f"Not standalone basis or URL missing at {dt.datetime.now().isoformat()}")
+                print(f"[+] Marked standalone companion for {symbol} ({quarter_label}) as NOT_FOUND locally.")
+                return
+
+            if not standalone_url.startswith("http"):
+                standalone_url = self.base_url + standalone_url
+            standalone_path = os.path.join(
+                output_dir,
+                self._build_standalone_file_name(
+                    symbol,
+                    quarter_label,
+                    standalone_url,
+                ),
+            )
+            if not os.path.exists(standalone_path):
+                download_err = self._download_file(standalone_url, standalone_path)
+                if download_err:
+                    print(f"[!] Failed to download standalone companion: {download_err}")
+                    if "404" in download_err:
+                        with open(notfound_path, "w") as f:
+                            f.write(f"Download returned 404 at {dt.datetime.now().isoformat()}")
+                else:
+                    print(f"[+] Standalone companion downloaded and cached: {standalone_path}")
 
     # ─── Download ────────────────────────────────────────────────────
 

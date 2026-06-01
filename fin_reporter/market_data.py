@@ -23,6 +23,7 @@ from fin_reporter.period_resolver import (
     quarter_start_date,
 )
 from fin_reporter.xbrl_parser import format_metric
+from fin_reporter.timing import time_block
 
 if TYPE_CHECKING:
     from fin_reporter.downloader import NSEXBRLDownloader
@@ -113,30 +114,33 @@ def fetch_corporate_actions_rows(
     force_refresh: bool = False,
 ) -> list[dict]:
     """Fetch dividend and other corporate actions from cache first, then NSE."""
-    cached_rows: list[dict] | None = None
-    if cache_dir and not force_refresh:
-        cached_rows = _load_cached_corporate_actions(cache_dir, symbol)
-        if cached_rows is not None:
-            return cached_rows
+    with time_block(category="Corporate Actions Fetch", detail=f"symbol={symbol}"):
+        cached_rows: list[dict] | None = None
+        if cache_dir and not force_refresh:
+            cached_rows = _load_cached_corporate_actions(cache_dir, symbol)
+            if cached_rows is not None:
+                # Log hit
+                return cached_rows
 
-    downloader.ensure_api_session()
-    url = "https://www.nseindia.com/api/corporates-corporateActions"
-    params = {"index": "equities", "symbol": symbol}
-    response = downloader._api_get(url, params=params)
-    if response.status_code != 200:
-        return cached_rows or []
+        downloader.ensure_api_session()
+        url = "https://www.nseindia.com/api/corporates-corporateActions"
+        params = {"index": "equities", "symbol": symbol}
+        response = downloader._api_get(url, params=params)
+        if response.status_code != 200:
+            return cached_rows or []
 
-    try:
-        rows = response.json()
-    except ValueError:
-        return cached_rows or []
-    if not isinstance(rows, list):
-        return cached_rows or []
+        try:
+            rows = response.json()
+        except ValueError:
+            return cached_rows or []
+        if not isinstance(rows, list):
+            return cached_rows or []
 
-    normalized_rows = [row for row in rows if isinstance(row, dict)]
-    if cache_dir and normalized_rows:
-        _save_corporate_actions_cache(cache_dir, symbol, normalized_rows)
-    return normalized_rows if normalized_rows else (cached_rows or [])
+        normalized_rows = [row for row in rows if isinstance(row, dict)]
+        if cache_dir:
+            # Save even if it is an empty list [] to record that there are no corporate actions!
+            _save_corporate_actions_cache(cache_dir, symbol, normalized_rows)
+        return normalized_rows if normalized_rows else (cached_rows or [])
 
 
 def _quarter_exdate_window(period_end: dt.date) -> tuple[dt.date, dt.date] | None:
@@ -490,19 +494,22 @@ def fetch_share_price_on_date(
 ) -> float | None:
     """Return NSE EQ close on ``as_of_date``, or the last trading day on/before it, using local cache first."""
     date_str = as_of_date.isoformat()
-    cached_prices = None
-    if cache_dir:
-        cached_prices = _load_cached_share_prices(cache_dir, symbol)
-        if cached_prices and date_str in cached_prices:
-            return cached_prices[date_str]
+    with time_block(category="Share Price Fetch", detail=f"symbol={symbol}, date={date_str}"):
+        cached_prices = None
+        if cache_dir:
+            cached_prices = _load_cached_share_prices(cache_dir, symbol)
+            if cached_prices and date_str in cached_prices:
+                val = cached_prices[date_str]
+                return val if val != -1.0 else None
 
-    price = _fetch_share_price_raw(downloader, symbol, as_of_date, restructuring_events)
-    if price is not None and cache_dir:
-        if cached_prices is None:
-            cached_prices = {}
-        cached_prices[date_str] = price
-        _save_share_prices_cache(cache_dir, symbol, cached_prices)
-    return price
+        price = _fetch_share_price_raw(downloader, symbol, as_of_date, restructuring_events)
+        if cache_dir:
+            if cached_prices is None:
+                cached_prices = {}
+            # Negative caching: store -1.0 if share price could not be fetched
+            cached_prices[date_str] = price if price is not None else -1.0
+            _save_share_prices_cache(cache_dir, symbol, cached_prices)
+        return price
 
 
 def _fetch_share_price_raw(

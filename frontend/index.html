@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Reporter Interactive Dashboard</title>
+    <!-- Google Fonts: Outfit (Display) and Inter (Sans-serif) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js CDN for stunning interactive graphics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Custom styling sheet -->
+    <link rel="stylesheet" href="style.css">
+    <!-- Main Javascript Controller -->
+    <script src="app.js" defer></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Main Dashboard Header -->
+        <header class="dashboard-header glass-card">
+            <div class="logo-area">
+                <i class="fa-solid fa-chart-line accent-glow"></i>
+                <div class="logo-text">
+                    <h1>FINANCIAL<span>REPORTER</span></h1>
+                    <p>Institutional-Grade Performance Analyzer</p>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div id="offline-badge" class="badge badge-success hidden">
+                    <span class="pulse-indicator"></span>
+                    <i class="fa-solid fa-shield-halved"></i> 100% Offline (Local Cache)
+                </div>
+                <div id="network-badge" class="badge badge-warning hidden">
+                    <span class="spinner-indicator"></span>
+                    <i class="fa-solid fa-cloud-arrow-down"></i> Syncing with NSE...
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace Grid -->
+        <main class="dashboard-grid">
+            <!-- Sidebar: Parameters & Filtering Controls -->
+            <section class="control-panel glass-card">
+                <h2><i class="fa-solid fa-sliders"></i> Control Panel</h2>
+                <hr class="glow-divider">
+
+                <form id="control-form" onsubmit="event.preventDefault();">
+                    <!-- Multi-Stock Picker -->
+                    <div class="form-group">
+                        <label for="symbol-search">Select Companies</label>
+                        <div class="stock-input-wrapper">
+                            <div id="selected-tags" class="selected-tags"></div>
+                            <input type="text" id="symbol-search" placeholder="Type company symbol..." autocomplete="off">
+                        </div>
+                        <div id="suggestions-box" class="suggestions-box hidden"></div>
+                        <small class="help-text">Search Nifty 50 or enter custom symbols (e.g. TCS, SBIN)</small>
+                    </div>
+
+                    <!-- Quarter Selection -->
+                    <div class="form-group">
+                        <label for="quarter-select">Anchor Quarter</label>
+                        <input type="text" id="quarter-select" list="quarter-options" placeholder="e.g. Q4_FY26" autocomplete="off">
+                        <datalist id="quarter-options"></datalist>
+                    </div>
+
+                    <!-- Quarters Depth Slider -->
+                    <div class="form-group">
+                        <label for="back-quarters-slider">
+                            Trailing Quarters: <span id="back-quarters-val">8</span>
+                        </label>
+                        <input type="range" id="back-quarters-slider" min="1" max="12" value="8" step="1">
+                        <div class="slider-labels">
+                            <span>1 Qtr</span>
+                            <span>6 Qtrs</span>
+                            <span>12 Qtrs</span>
+                        </div>
+                    </div>
+
+                    <!-- EBITDA Setting -->
+                    <div class="form-group">
+                        <label for="ebitda-definition">EBITDA Formula Definition</label>
+                        <select id="ebitda-definition">
+                            <option value="tickertape">Tickertape (Standard Operating + Other Income)</option>
+                            <option value="subtract-other-income">Subtract Other Income (Pure Core Operating)</option>
+                        </select>
+                    </div>
+
+                    <!-- Metrics Picker -->
+                    <div class="form-group">
+                        <label>Metrics to Display</label>
+                        <div id="metrics-picker-wrapper" class="metrics-picker-wrapper">
+                            <div id="metrics-selected-tags" class="selected-tags"></div>
+                            <input type="text" id="metrics-search" placeholder="Search metrics..." autocomplete="off">
+                        </div>
+                        <div id="metrics-dropdown" class="metrics-dropdown hidden">
+                            <div id="metrics-dropdown-list" class="metrics-dropdown-list"></div>
+                        </div>
+                        <small class="help-text">Select which financial parameters appear in tables &amp; charts. Leave empty for all.</small>
+                    </div>
+
+                    <!-- Primary Action Button -->
+                    <button type="submit" id="analyze-btn" class="btn btn-primary">
+                        <i class="fa-solid fa-chart-simple"></i> Analyze Performance
+                    </button>
+                </form>
+            </section>
+
+            <!-- Main Content Area: Tables & Interactive Visualizations -->
+            <section class="content-panel">
+                <!-- Status Logs Overlay -->
+                <div id="log-console" class="glass-card hidden">
+                    <h3><i class="fa-solid fa-terminal"></i> Calculation Progress</h3>
+                    <hr class="glow-divider">
+                    <div id="log-list" class="log-list"></div>
+                </div>
+
+                <!-- Empty State Prompt -->
+                <div id="empty-state" class="glass-card empty-state">
+                    <i class="fa-solid fa-folder-open empty-icon"></i>
+                    <h2>No Stocks Selected</h2>
+                    <p>Select one or more companies in the Control Panel and click **Analyze Performance** to unlock institutional-grade financial metrics, time-series growth curves, and corporate timelines.</p>
+                </div>
+
+                <!-- Main Analysis Results (Hidden initially) -->
+                <div id="results-area" class="hidden">
+                    
+                    <!-- Chart Tab Container -->
+                    <div class="glass-card chart-container">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-chart-area"></i> Performance Trends</h3>
+                        </div>
+                        <hr class="glow-divider">
+                        <div class="canvas-wrapper">
+                            <canvas id="trends-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Company Tabs: one per stock -->
+                    <div class="glass-card company-tabs-container">
+                        <div id="company-tab-bar" class="company-tab-bar"></div>
+                        <hr class="glow-divider">
+                        <div id="company-tab-content" class="company-tab-content"></div>
+                    </div>
+
+                    <!-- Global CSV Export bar -->
+                    <div class="export-actions">
+                        <button id="export-csv-btn" class="btn btn-secondary">
+                            <i class="fa-solid fa-file-csv"></i> Export metrics to CSV
+                        </button>
+                    </div>
+
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>&copy; 2026 Financial Reporter. Institutional Grade Performance Analysis. Built 100% Offline.</p>
+        </footer>
+    </div>
+</body>
+</html>
